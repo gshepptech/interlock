@@ -1,0 +1,1 @@
+{"session_id":"d5a36425-d47b-4eed-b9d6-4182d9546f8a","transcript_path":"/Users/x/.claude/projects/-repo/d5a36425.jsonl","cwd":"/repo","prompt_id":"903993e4-7c9d-4d7b-b1a1-f8c50b3a14d6","permission_mode":"acceptEdits","effort":{"level":"high"},"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/repo/FORBIDDEN.txt","content":"hello\n"}}
