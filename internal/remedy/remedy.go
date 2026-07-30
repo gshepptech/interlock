@@ -46,7 +46,7 @@ type Store struct {
 func Open(root string) (*Store, error) { return open(root, TTL, time.Now) }
 
 func open(root string, ttl time.Duration, now func() time.Time) (*Store, error) {
-	dir := filepath.Join(root, ".agentcoord", "remedy")
+	dir := filepath.Join(root, ".interlock", "remedy")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create remedy dir: %w", err)
 	}

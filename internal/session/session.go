@@ -69,7 +69,7 @@ type Store struct {
 func Open(root string) (*Store, error) { return open(root, time.Now) }
 
 func open(root string, now func() time.Time) (*Store, error) {
-	dir := filepath.Join(root, ".agentcoord", "sessions")
+	dir := filepath.Join(root, ".interlock", "sessions")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create session dir: %w", err)
 	}

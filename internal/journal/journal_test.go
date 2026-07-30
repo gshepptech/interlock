@@ -241,7 +241,7 @@ func TestOpenCreatesTheDirectory(t *testing.T) {
 	if _, err := open(root, func() time.Time { return now }); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, ".agentcoord")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, ".interlock")); err != nil {
 		t.Errorf("directory not created: %v", err)
 	}
 }

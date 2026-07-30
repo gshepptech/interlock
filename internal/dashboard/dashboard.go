@@ -16,10 +16,10 @@ import (
 	"net/http"
 	"time"
 
-	"agentcoord/internal/config"
-	"agentcoord/internal/journal"
-	"agentcoord/internal/lease"
-	"agentcoord/internal/session"
+	"interlock/internal/config"
+	"interlock/internal/journal"
+	"interlock/internal/lease"
+	"interlock/internal/session"
 )
 
 // View is everything the page shows, assembled before rendering so the template
@@ -161,7 +161,7 @@ func Build(cfg *config.Config, sessions []*session.Session, leases []*lease.Leas
 	if len(v.Sessions) == 0 {
 		v.Warning = "No agent has run here since this tool was installed. " +
 			"Territory is only enforced for agents whose hooks are wired up. " +
-			"Run agentcoord doctor to check."
+			"Run interlock doctor to check."
 	}
 	return v
 }
@@ -227,7 +227,7 @@ var page = template.Must(template.New("dashboard").Parse(`<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="{{.RefreshSecs}}">
-<title>agentcoord</title>
+<title>interlock</title>
 <!-- An empty data URI, so the browser does not request a favicon this server
      would 404. A page that refreshes every few seconds would otherwise log an
      error every few seconds. -->
@@ -279,7 +279,7 @@ h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .09em;
 <body>
 <div class="wrap">
 <header>
-  <h1>agentcoord</h1>
+  <h1>interlock</h1>
   <span class="meta mono grow">{{.Root}}</span>
   <span class="meta">{{.GeneratedAt}}, refreshing every {{.RefreshSecs}}s</span>
 </header>
@@ -328,7 +328,7 @@ h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .09em;
   {{end}}
 {{else}}
   <p class="empty">Nothing has been blocked. Either the agents have stayed in their
-  own territory, or the hooks are not wired up. Run <code>agentcoord doctor</code>
+  own territory, or the hooks are not wired up. Run <code>interlock doctor</code>
   to tell the difference.</p>
 {{end}}
 

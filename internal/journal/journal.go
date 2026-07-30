@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"agentcoord/internal/lockfile"
+	"interlock/internal/lockfile"
 )
 
 // Keep is how many entries survive a trim. Enough to cover a working day of
@@ -78,7 +78,7 @@ type Store struct {
 func Open(root string) (*Store, error) { return open(root, time.Now) }
 
 func open(root string, now func() time.Time) (*Store, error) {
-	dir := filepath.Join(root, ".agentcoord")
+	dir := filepath.Join(root, ".interlock")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create journal dir: %w", err)
 	}

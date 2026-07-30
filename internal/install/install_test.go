@@ -34,7 +34,7 @@ func TestApplyCreatesSettingsWhenThereAreNone(t *testing.T) {
 	root := t.TempDir()
 	target := claudeTarget(root)
 
-	change, err := Apply(target, "/bin/agentcoord", false)
+	change, err := Apply(target, "/bin/interlock", false)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestApplyPreservesEverythingElse(t *testing.T) {
 		t.Fatalf("seed settings: %v", err)
 	}
 
-	change, err := Apply(target, "/bin/agentcoord", false)
+	change, err := Apply(target, "/bin/interlock", false)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -122,10 +122,10 @@ func TestApplyIsIdempotent(t *testing.T) {
 	root := t.TempDir()
 	target := claudeTarget(root)
 
-	if _, err := Apply(target, "/bin/agentcoord", false); err != nil {
+	if _, err := Apply(target, "/bin/interlock", false); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
-	second, err := Apply(target, "/bin/agentcoord", false)
+	second, err := Apply(target, "/bin/interlock", false)
 	if err != nil {
 		t.Fatalf("second Apply: %v", err)
 	}
@@ -144,10 +144,10 @@ func TestApplyRecognisesItsOwnEntryAfterTheBinaryMoves(t *testing.T) {
 	root := t.TempDir()
 	target := claudeTarget(root)
 
-	if _, err := Apply(target, "/old/path/agentcoord", false); err != nil {
+	if _, err := Apply(target, "/old/path/interlock", false); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	again, err := Apply(target, "/new/place/agentcoord", false)
+	again, err := Apply(target, "/new/place/interlock", false)
 	if err != nil {
 		t.Fatalf("Apply after move: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestDryRunReportsWithoutWriting(t *testing.T) {
 	root := t.TempDir()
 	target := claudeTarget(root)
 
-	change, err := Apply(target, "/bin/agentcoord", true)
+	change, err := Apply(target, "/bin/interlock", true)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestBrokenSettingsAreRefusedNotOverwritten(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if _, err := Apply(target, "/bin/agentcoord", false); err == nil {
+	if _, err := Apply(target, "/bin/interlock", false); err == nil {
 		t.Fatal("Apply succeeded on unparseable settings")
 	}
 
@@ -213,7 +213,7 @@ func TestRemoveTakesOnlyOurHooksBackOut(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if _, err := Apply(target, "/bin/agentcoord", false); err != nil {
+	if _, err := Apply(target, "/bin/interlock", false); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	change, err := Remove(target, false)
@@ -275,11 +275,11 @@ func TestCodexPlanHasNoSessionEnd(t *testing.T) {
 func TestGitignoreAddsOnceAndOnlyOnce(t *testing.T) {
 	root := t.TempDir()
 
-	added, err := Gitignore(root, ".agentcoord/")
+	added, err := Gitignore(root, ".interlock/")
 	if err != nil || !added {
 		t.Fatalf("first Gitignore: added=%v err=%v", added, err)
 	}
-	again, err := Gitignore(root, ".agentcoord/")
+	again, err := Gitignore(root, ".interlock/")
 	if err != nil {
 		t.Fatalf("second Gitignore: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestGitignoreAddsOnceAndOnlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read .gitignore: %v", err)
 	}
-	if strings.Count(string(raw), ".agentcoord/") != 1 {
+	if strings.Count(string(raw), ".interlock/") != 1 {
 		t.Errorf(".gitignore = %q, want one entry", raw)
 	}
 }
@@ -303,7 +303,7 @@ func TestGitignoreAppendsSafelyToAFileWithoutATrailingNewline(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if _, err := Gitignore(root, ".agentcoord/"); err != nil {
+	if _, err := Gitignore(root, ".interlock/"); err != nil {
 		t.Fatalf("Gitignore: %v", err)
 	}
 
@@ -311,7 +311,7 @@ func TestGitignoreAppendsSafelyToAFileWithoutATrailingNewline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if strings.Contains(string(raw), "node_modules.agentcoord") {
+	if strings.Contains(string(raw), "node_modules.interlock") {
 		t.Errorf("entries were joined: %q", raw)
 	}
 	if !strings.Contains(string(raw), "node_modules\n") {

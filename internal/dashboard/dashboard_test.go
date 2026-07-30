@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"agentcoord/internal/config"
-	"agentcoord/internal/journal"
-	"agentcoord/internal/lease"
-	"agentcoord/internal/session"
+	"interlock/internal/config"
+	"interlock/internal/journal"
+	"interlock/internal/lease"
+	"interlock/internal/session"
 )
 
 func loadConfig(t *testing.T, body string) *config.Config {

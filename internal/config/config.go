@@ -13,17 +13,17 @@ import (
 	"slices"
 	"strings"
 
-	"agentcoord/internal/territory"
+	"interlock/internal/territory"
 )
 
 // FileName is looked for in the working directory and every parent up to the
 // filesystem root, so an agent invoked from a subdirectory still finds it.
-const FileName = ".agentcoord.json"
+const FileName = ".interlock.json"
 
 // EnvTeam overrides which team the current session belongs to. Teams span
 // vendors, so a second Claude session can join the frontend team without
 // reinstalling anything.
-const EnvTeam = "AGENTCOORD_TEAM"
+const EnvTeam = "INTERLOCK_TEAM"
 
 // File is the on-disk shape.
 type File struct {

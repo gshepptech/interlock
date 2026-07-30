@@ -24,7 +24,7 @@ import (
 
 // marker identifies entries this tool owns. Matching on the subcommand rather
 // than on the full path means moving the binary does not orphan its entries.
-const marker = "agentcoord hook"
+const marker = "interlock hook"
 
 // claudeWriteTools is every Claude Code tool that can put bytes on disk.
 //
@@ -294,7 +294,7 @@ func write(file string, doc map[string]any) error {
 	}
 	enc = append(enc, '\n')
 
-	tmp, err := os.CreateTemp(filepath.Dir(file), ".agentcoord-tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(file), ".interlock-tmp-*")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
@@ -318,7 +318,7 @@ func write(file string, doc map[string]any) error {
 // overwrites an existing backup. A second run must not clobber the copy of the
 // file as it was before this tool ever ran.
 func backupOnce(file string) (string, error) {
-	backup := file + ".agentcoord-backup"
+	backup := file + ".interlock-backup"
 	if _, err := os.Stat(backup); err == nil {
 		return backup, nil
 	}

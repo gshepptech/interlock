@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"agentcoord/internal/lockfile"
+	"interlock/internal/lockfile"
 )
 
 // DefaultTTL is how long a declared shared file is held without being renewed.
@@ -93,7 +93,7 @@ func Open(root string) (*Store, error) {
 }
 
 func open(root string, ttl time.Duration, now func() time.Time) (*Store, error) {
-	dir := filepath.Join(root, ".agentcoord", "leases")
+	dir := filepath.Join(root, ".interlock", "leases")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create lease dir: %w", err)
 	}

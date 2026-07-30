@@ -1,4 +1,4 @@
-# agentcoord
+# interlock
 
 Lets coding agents from different vendors work the same repo at the same time
 without overwriting each other.
@@ -8,7 +8,7 @@ shared checkout. They see each other. Whoever writes a file first has it for a
 minute or two, and the other is told who is in there so it works on something
 else and comes back.
 
-**There is nothing to configure.** Run `agentcoord init` once and open your
+**There is nothing to configure.** Run `interlock init` once and open your
 agents.
 
 No orchestrator. Neither agent is launched or owned by this tool. No worktrees.
@@ -46,7 +46,7 @@ conflict, not a permission one, so work on something else and come back.
 
 **Territory** is optional, and only worth declaring for a rule the automatic
 behaviour cannot infer, such as one team owning `migrations/` outright. Most
-repos never need it. `agentcoord init --with-territory` writes a starter file.
+repos never need it. `interlock init --with-territory` writes a starter file.
 
 One property shapes the lease design: **an agent cannot wait.** There is no way
 to park a tool call and resume it when a lock frees, so a held file produces a
@@ -79,12 +79,12 @@ out of another tool's session files.
 ## Try it
 
 ```bash
-go build -o bin/agentcoord ./cmd/agentcoord
+go build -o bin/interlock ./cmd/interlock
 cd /your/repo
-/path/to/bin/agentcoord init --dry-run   # see exactly what would change
-/path/to/bin/agentcoord init             # wire the hooks into both agents
-/path/to/bin/agentcoord status           # territory, plus who holds what
-/path/to/bin/agentcoord dashboard        # live view on 127.0.0.1:7717
+/path/to/bin/interlock init --dry-run   # see exactly what would change
+/path/to/bin/interlock init             # wire the hooks into both agents
+/path/to/bin/interlock status           # territory, plus who holds what
+/path/to/bin/interlock dashboard        # live view on 127.0.0.1:7717
 ```
 
 `init` merges into `.claude/settings.json` and `.codex/hooks.json` rather than
@@ -92,7 +92,7 @@ replacing them, keeps a copy of anything it modifies, is safe to run twice, and
 refuses to touch settings it cannot parse. `init --uninstall` takes its hooks
 back out and leaves everything else alone.
 
-Territory is declared per repo in `.agentcoord.json`:
+Territory is declared per repo in `.interlock.json`:
 
 ```json
 {
@@ -104,10 +104,10 @@ Territory is declared per repo in `.agentcoord.json`:
 ```
 
 A team can span vendors. Two Claude sessions and a Codex session can all be
-`backend`. Set `AGENTCOORD_TEAM` to put one session on a team other than its
+`backend`. Set `INTERLOCK_TEAM` to put one session on a team other than its
 agent's default.
 
-Add `.agentcoord/` to `.gitignore`. Leases are local runtime state.
+Add `.interlock/` to `.gitignore`. Leases are local runtime state.
 
 ### Codex needs the repo trusted
 
@@ -207,7 +207,7 @@ have is worse than none.
 
 - **Opaque shell writes are caught after the fact, not before.** A command whose
   target cannot be read off the command line is allowed, then checked. Outside a
-  git repo it cannot even be checked, and `agentcoord doctor` says so.
+  git repo it cannot even be checked, and `interlock doctor` says so.
 - **Claude Code and Codex only.** Cursor and Gemini CLI both have hooks and
   should slot into `hookio` without touching anything else.
 - **Unix only.** Leases need an advisory lock the kernel releases on process
@@ -225,7 +225,7 @@ have is worse than none.
 ## Layout
 
 ```
-cmd/agentcoord/       CLI: hook, status, init
+cmd/interlock/       CLI: hook, status, init
 internal/hookio/      payload normalisation, the only vendor-aware code
 internal/territory/   path globs to team ownership
 internal/lease/       one holder at a time on shared files
@@ -237,14 +237,14 @@ internal/remedy/      narrow permission to undo a flagged write
 internal/lockfile/    the one advisory lock, released by the kernel on death
 internal/dashboard/   the live view, server-rendered
 internal/install/     merging hooks into each agent's own settings
-internal/config/      per-repo .agentcoord.json
+internal/config/      per-repo .interlock.json
 ```
 
 `internal/hookio/testdata` holds payloads captured from real Claude Code and
 Codex sessions. If a vendor changes its envelope, those tests are how we find
 out.
 
-`cmd/agentcoord/main_test.go` runs the built binary against real payloads in real
+`cmd/interlock/main_test.go` runs the built binary against real payloads in real
 git repositories. Both of the bugs recorded above lived in the wiring between
 packages, where no unit test could see them, and both were reintroduced
 deliberately to confirm these tests fail on them. One of the two is caught only
@@ -259,7 +259,7 @@ Installed but not enforcing, with nothing to tell you. Codex skips project hooks
 in a repo it does not trust and says nothing about it, so half a setup looks
 exactly like a working one until two agents collide.
 
-`agentcoord doctor` exists for that:
+`interlock doctor` exists for that:
 
 ```
 ok    config                  2 teams, root /your/repo

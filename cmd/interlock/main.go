@@ -1,4 +1,4 @@
-// Command agentcoord lets coding agents from different vendors work one repo
+// Command interlock lets coding agents from different vendors work one repo
 // without overwriting each other.
 //
 // It is invoked as a hook by each agent. On SessionStart it tells the agent what
@@ -21,28 +21,28 @@ import (
 	"strings"
 	"time"
 
-	"agentcoord/internal/config"
-	"agentcoord/internal/dashboard"
-	"agentcoord/internal/gitstate"
-	"agentcoord/internal/hookio"
-	"agentcoord/internal/install"
-	"agentcoord/internal/journal"
-	"agentcoord/internal/lease"
-	"agentcoord/internal/remedy"
-	"agentcoord/internal/session"
-	"agentcoord/internal/shellscan"
-	"agentcoord/internal/territory"
+	"interlock/internal/config"
+	"interlock/internal/dashboard"
+	"interlock/internal/gitstate"
+	"interlock/internal/hookio"
+	"interlock/internal/install"
+	"interlock/internal/journal"
+	"interlock/internal/lease"
+	"interlock/internal/remedy"
+	"interlock/internal/session"
+	"interlock/internal/shellscan"
+	"interlock/internal/territory"
 )
 
-const usage = `agentcoord - keep coding agents out of each other's way
+const usage = `interlock - keep coding agents out of each other's way
 
-  agentcoord hook <event> <agent>   run as an agent hook (reads payload on stdin)
-  agentcoord status                 show territory and who holds what
-  agentcoord doctor                 check for the ways this silently fails
-  agentcoord dashboard [--addr A]   serve a live view on 127.0.0.1 (default :7717)
-  agentcoord init [--dry-run]       wire the hooks into each agent's settings
-  agentcoord init --with-territory  also write a territory file, if you want rules
-  agentcoord init --uninstall       take them back out
+  interlock hook <event> <agent>   run as an agent hook (reads payload on stdin)
+  interlock status                 show territory and who holds what
+  interlock doctor                 check for the ways this silently fails
+  interlock dashboard [--addr A]   serve a live view on 127.0.0.1 (default :7717)
+  interlock init [--dry-run]       wire the hooks into each agent's settings
+  interlock init --with-territory  also write a territory file, if you want rules
+  interlock init --uninstall       take them back out
 
 Events: SessionStart, PreToolUse, PostToolUse, SessionEnd, Stop
 Agents: claude, codex
@@ -92,7 +92,7 @@ func main() {
 // own repo.
 func runHook(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprint(os.Stderr, "usage: agentcoord hook <event> <agent>\n")
+		fmt.Fprint(os.Stderr, "usage: interlock hook <event> <agent>\n")
 		return exitUsage
 	}
 	event, agent := args[0], hookio.Agent(args[1])
@@ -170,7 +170,7 @@ func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.
 			// caught and the agent is told to undo it.
 			if !armVerify(cfg, ev.SessionID) {
 				fmt.Fprintf(os.Stderr,
-					"agentcoord: this command writes somewhere that cannot be read "+
+					"interlock: this command writes somewhere that cannot be read "+
 						"from the command line (%s), and this tree cannot be watched "+
 						"(no git), so territory is not enforced for it. Stay inside "+
 						"%q.\n", found.Reason, team)
@@ -188,7 +188,7 @@ func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.
 	store, err := lease.Open(cfg.Root)
 	if err != nil {
 		// Without leases, territory still works. Enforce what we can.
-		fmt.Fprintf(os.Stderr, "agentcoord: leases unavailable (%v), "+
+		fmt.Fprintf(os.Stderr, "interlock: leases unavailable (%v), "+
 			"territory still enforced\n", err)
 		store = nil
 	}
@@ -221,7 +221,7 @@ func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.
 			// purpose: this exact path, this session, for a short window.
 			if allowedToRemedy(cfg, ev.SessionID, rel(cfg.Root, file)) {
 				fmt.Fprintf(os.Stderr,
-					"agentcoord: allowing this write to %s so you can undo the "+
+					"interlock: allowing this write to %s so you can undo the "+
 						"change you were asked to revert.\n", rel(cfg.Root, file))
 				continue
 			}
@@ -232,7 +232,7 @@ func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.
 				Detail: fmt.Sprintf("belongs to %q, matched %q", owner, pattern),
 			})
 			fmt.Fprintf(os.Stderr,
-				"Blocked by agentcoord: %s belongs to the %q team (matched %q), "+
+				"Blocked by interlock: %s belongs to the %q team (matched %q), "+
 					"and you are on %q. Another agent may be working there right now. "+
 					"Work inside your own territory, or ask for this file to be shared.\n",
 				rel(cfg.Root, file), owner, pattern, team)
@@ -269,7 +269,7 @@ func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.
 					time.Since(current.Acquired).Round(time.Second)),
 			})
 			fmt.Fprintf(os.Stderr,
-				"Blocked by agentcoord: %s is being worked on by another agent "+
+				"Blocked by interlock: %s is being worked on by another agent "+
 					"right now (%s). This is a timing conflict, not a permission "+
 					"one: work on something else and come back to it. Do not try "+
 					"to write it another way.\n",
@@ -497,7 +497,7 @@ func emitContext(text string) {
 // allow reports a problem without blocking. Always returns exitOK, so callers
 // read as `return allow(...)` at every fail-open site.
 func allow(format string, args ...any) int {
-	fmt.Fprintf(os.Stderr, "agentcoord: "+format+" (allowing the call)\n", args...)
+	fmt.Fprintf(os.Stderr, "interlock: "+format+" (allowing the call)\n", args...)
 	return exitOK
 }
 
@@ -641,7 +641,7 @@ func runDashboard(args []string) int {
 		Handler:           dashboard.Handler(load),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	fmt.Printf("agentcoord dashboard on http://%s\n", addr)
+	fmt.Printf("interlock dashboard on http://%s\n", addr)
 	if err := srv.ListenAndServe(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
@@ -784,10 +784,10 @@ func runInit(args []string) int {
 	}
 
 	if !dryRun {
-		if added, err := install.Gitignore(cwd, ".agentcoord/"); err != nil {
+		if added, err := install.Gitignore(cwd, ".interlock/"); err != nil {
 			fmt.Fprintf(os.Stderr, "gitignore: %v\n", err)
 		} else if added {
-			fmt.Println("added .agentcoord/ to .gitignore, it is local runtime state")
+			fmt.Println("added .interlock/ to .gitignore, it is local runtime state")
 		}
 	}
 
@@ -802,10 +802,10 @@ project and skips them silently otherwise, so add this to ~/.codex/config.toml:
   [projects.%q]
   trust_level = "trusted"
 
-Then run: agentcoord doctor, and agentcoord dashboard to watch them work.
+Then run: interlock doctor, and interlock dashboard to watch them work.
 
 If you ever need a hard rule the automatic behaviour cannot work out, such as
-one team owning a directory outright, run: agentcoord init --with-territory
+one team owning a directory outright, run: interlock init --with-territory
 `, cwd)
 	if failed {
 		return 1
@@ -833,7 +833,7 @@ func uninstallHooks(root string, dryRun bool) int {
 				target.Agent, strings.Join(change.Removed, ", "), rel(root, change.File))
 		}
 	}
-	fmt.Printf("\n%s and .agentcoord/ are left in place. Delete them if you are done.\n",
+	fmt.Printf("\n%s and .interlock/ are left in place. Delete them if you are done.\n",
 		config.FileName)
 	if failed {
 		return 1
@@ -844,7 +844,7 @@ func uninstallHooks(root string, dryRun bool) int {
 // pendingDir holds the snapshot taken before a command whose targets could not
 // be read off the command line.
 func pendingDir(root string) string {
-	return filepath.Join(root, ".agentcoord", "pending")
+	return filepath.Join(root, ".interlock", "pending")
 }
 
 func pendingFile(root, sessionID string) string {
@@ -905,7 +905,7 @@ func verifyAfter(cfg *config.Config, team string, agent hookio.Agent, ev *hookio
 	var escaped []string
 	for _, path := range gitstate.Changed(&before, after) {
 		// Our own runtime state changes constantly and is nobody's territory.
-		if strings.HasPrefix(path, ".agentcoord/") {
+		if strings.HasPrefix(path, ".interlock/") {
 			continue
 		}
 		decision, pattern, err := cfg.Map.Check(team, filepath.Join(cfg.Root, path))
@@ -932,13 +932,13 @@ func verifyAfter(cfg *config.Config, team string, agent hookio.Agent, ev *hookio
 	// PostToolUse can put text in front of the model on both agents, which is
 	// the only thing that turns this into a correction rather than a log line.
 	emitPostContext(fmt.Sprintf(
-		"agentcoord: that command wrote %s, which the %s team does not own. "+
+		"interlock: that command wrote %s, which the %s team does not own. "+
 			"You have been granted permission to revert exactly those paths for "+
 			"the next %s, so delete or restore them now and then stay inside your "+
 			"own territory.",
 		strings.Join(escaped, ", "), team, remedy.TTL))
 	fmt.Fprintf(os.Stderr,
-		"agentcoord: %s wrote outside %q: %s\n",
+		"interlock: %s wrote outside %q: %s\n",
 		agent, team, strings.Join(escaped, ", "))
 }
 
@@ -1018,7 +1018,7 @@ func runDoctor() int {
 			report(false, target.Agent+" hooks", err.Error())
 		case len(wired) == 0:
 			report(false, target.Agent+" hooks",
-				"not wired up. Run: agentcoord init")
+				"not wired up. Run: interlock init")
 		case len(wired) < len(target.Events):
 			report(false, target.Agent+" hooks",
 				fmt.Sprintf("only %s wired, expected %d events",

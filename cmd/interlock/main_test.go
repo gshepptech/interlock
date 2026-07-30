@@ -24,12 +24,12 @@ import (
 var binPath string
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "agentcoord-bin-*")
+	dir, err := os.MkdirTemp("", "interlock-bin-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "temp dir: %v\n", err)
 		os.Exit(1)
 	}
-	binPath = filepath.Join(dir, "agentcoord")
+	binPath = filepath.Join(dir, "interlock")
 
 	build := exec.Command("go", "build", "-o", binPath, ".")
 	if out, err := build.CombinedOutput(); err != nil {
@@ -70,7 +70,7 @@ func repo(t *testing.T, config string) string {
 		dir = resolved
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, ".agentcoord.json"),
+	if err := os.WriteFile(filepath.Join(dir, ".interlock.json"),
 		[]byte(config), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -474,7 +474,7 @@ func TestBlocksAreRecordedInTheJournal(t *testing.T) {
 	hook(t, dir, "PreToolUse", "claude",
 		write("s1", filepath.Join(dir, "src/components/Button.tsx")))
 
-	raw, err := os.ReadFile(filepath.Join(dir, ".agentcoord", "journal.jsonl"))
+	raw, err := os.ReadFile(filepath.Join(dir, ".interlock", "journal.jsonl"))
 	if err != nil {
 		t.Fatalf("no journal was written: %v", err)
 	}
@@ -533,7 +533,7 @@ func TestTeamEnvOverrideChangesEnforcement(t *testing.T) {
 
 	cmd := exec.Command(binPath, "hook", "PreToolUse", "claude")
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "AGENTCOORD_TEAM=frontend")
+	cmd.Env = append(os.Environ(), "INTERLOCK_TEAM=frontend")
 	cmd.Stdin = strings.NewReader(string(raw))
 	out, _ := cmd.CombinedOutput()
 
@@ -648,7 +648,7 @@ func TestInstalledConfigActuallyFiresForEveryWritingTool(t *testing.T) {
 					continue
 				}
 				for _, h := range group.Hooks {
-					if strings.Contains(h.Command, "agentcoord hook") {
+					if strings.Contains(h.Command, "interlock hook") {
 						fired = true
 					}
 				}
