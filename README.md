@@ -48,14 +48,27 @@ redirect ("someone else has this, go and do something else") and never a queue.
 tool would be sidestepped by `sed -i`, so shell commands are scanned for the
 paths they are likely to write.
 
+**The dashboard** is how a person sees all of it at once: who is here, what each
+agent last touched, and which shared files are held. It binds to loopback only,
+has no flag to change that, and refuses a non-loopback address. It ships no
+JavaScript and fetches nothing, because it renders paths and model names that came
+out of another tool's session files.
+
 ## Try it
 
 ```bash
 go build -o bin/agentcoord ./cmd/agentcoord
 cd /your/repo
-/path/to/bin/agentcoord init      # writes .agentcoord.json, prints hook wiring
-/path/to/bin/agentcoord status    # territory, plus who holds what right now
+/path/to/bin/agentcoord init --dry-run   # see exactly what would change
+/path/to/bin/agentcoord init             # wire the hooks into both agents
+/path/to/bin/agentcoord status           # territory, plus who holds what
+/path/to/bin/agentcoord dashboard        # live view on 127.0.0.1:7717
 ```
+
+`init` merges into `.claude/settings.json` and `.codex/hooks.json` rather than
+replacing them, keeps a copy of anything it modifies, is safe to run twice, and
+refuses to touch settings it cannot parse. `init --uninstall` takes its hooks
+back out and leaves everything else alone.
 
 Territory is declared per repo in `.agentcoord.json`:
 
@@ -103,6 +116,16 @@ asked to edit the same file, said:
 was blocked and offered to hand the work to the owning team instead. The file was
 unchanged.
 
+**`init` against real settings.** Given a `.claude/settings.json` holding a model
+choice, a permissions block and the user's own `PreToolUse` guard, it added its
+four hooks, left every one of those intact, kept the user's guard first in the
+list, wrote a backup, appended to a `.gitignore` that had no trailing newline
+without joining the entries, and reported "already wired up" on a second run.
+
+**The dashboard.** Rendered both agents with the files they touched, the lease
+held by backend, and per-team active counts, in light and dark. Zero script tags,
+zero external URLs. It refused `--addr 0.0.0.0:7720`.
+
 The point is not that the writes failed. It is that both agents read the reason
 and reasoned about it. That is awareness, not an error message.
 
@@ -147,7 +170,6 @@ have is worse than none.
   `xargs`, or an interpreter like `python3`, the hook says so on stderr and allows
   it. Blocking every such command would stop normal work. This is the one hole
   left.
-- **No dashboard.** `status` is the whole read model today.
 - **Claude Code and Codex only.** Cursor and Gemini CLI both have hooks and
   should slot into `hookio` without touching anything else.
 - **Unix only.** Leases need an advisory lock the kernel releases on process
@@ -164,6 +186,9 @@ internal/hookio/      payload normalisation, the only vendor-aware code
 internal/territory/   path globs to team ownership
 internal/lease/       one holder at a time on shared files
 internal/shellscan/   paths a shell command is likely to write
+internal/session/     who is here and what they last touched
+internal/dashboard/   the live view, server-rendered
+internal/install/     merging hooks into each agent's own settings
 internal/config/      per-repo .agentcoord.json
 ```
 

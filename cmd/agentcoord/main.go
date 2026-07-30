@@ -12,14 +12,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"agentcoord/internal/config"
+	"agentcoord/internal/dashboard"
 	"agentcoord/internal/hookio"
+	"agentcoord/internal/install"
 	"agentcoord/internal/lease"
+	"agentcoord/internal/session"
 	"agentcoord/internal/shellscan"
 	"agentcoord/internal/territory"
 )
@@ -28,7 +33,9 @@ const usage = `agentcoord - keep coding agents out of each other's way
 
   agentcoord hook <event> <agent>   run as an agent hook (reads payload on stdin)
   agentcoord status                 show territory and who holds what
-  agentcoord init                   write starter config and print hook wiring
+  agentcoord dashboard [--addr A]   serve a live view on 127.0.0.1 (default :7717)
+  agentcoord init [--dry-run]       wire the hooks into each agent's settings
+  agentcoord init --uninstall       take them back out
 
 Events: SessionStart, PreToolUse, PostToolUse, SessionEnd, Stop
 Agents: claude, codex
@@ -54,8 +61,10 @@ func main() {
 		os.Exit(runHook(args[1:]))
 	case "status":
 		os.Exit(runStatus())
+	case "dashboard":
+		os.Exit(runDashboard(args[1:]))
 	case "init":
-		os.Exit(runInit())
+		os.Exit(runInit(args[1:]))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		os.Exit(exitOK)
@@ -114,17 +123,23 @@ func runHook(args []string) int {
 
 	switch event {
 	case "SessionStart":
+		note(cfg, ev, team, agent)
 		emitContext(cfg.Summary(team) + presence(cfg, ev.SessionID))
 		return exitOK
 	case "PreToolUse":
+		note(cfg, ev, team, agent)
 		return checkWrite(cfg, team, agent, ev)
 	case "PostToolUse":
+		note(cfg, ev, team, agent)
+		recordTouches(cfg, ev)
 		renew(cfg, team, agent, ev)
 		return exitOK
 	case "SessionEnd", "Stop":
 		release(cfg, ev.SessionID)
+		endSession(cfg, ev.SessionID)
 		return exitOK
 	default:
+		note(cfg, ev, team, agent)
 		return exitOK
 	}
 }
@@ -257,6 +272,51 @@ func release(cfg *config.Config, sessionID string) {
 	store.Release(sessionID)
 }
 
+// note records that this session is alive and what it is.
+//
+// Every event does this, not just SessionStart, because SessionStart is not
+// guaranteed to have fired: hooks can be installed mid-session, and a resumed
+// session may never send one. Errors are dropped, because failing to record
+// presence is not worth telling anyone about and certainly not worth blocking.
+func note(cfg *config.Config, ev *hookio.Event, team string, agent hookio.Agent) {
+	if ev.SessionID == "" {
+		return
+	}
+	store, err := session.Open(cfg.Root)
+	if err != nil {
+		return
+	}
+	store.Seen(ev.SessionID, string(agent), team, ev.Model, ev.CWD)
+}
+
+// recordTouches remembers the files a session just wrote, so the dashboard can
+// show what it is working on rather than only that it exists.
+func recordTouches(cfg *config.Config, ev *hookio.Event) {
+	if ev.SessionID == "" || len(ev.Files) == 0 {
+		return
+	}
+	store, err := session.Open(cfg.Root)
+	if err != nil {
+		return
+	}
+	paths := make([]string, 0, len(ev.Files))
+	for _, f := range ev.Files {
+		paths = append(paths, rel(cfg.Root, f))
+	}
+	store.Touched(ev.SessionID, ev.ToolName, paths)
+}
+
+func endSession(cfg *config.Config, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	store, err := session.Open(cfg.Root)
+	if err != nil {
+		return
+	}
+	store.End(sessionID)
+}
+
 // presence describes the other agents currently holding shared files, for
 // injection at session start. Nothing is said when the repo is quiet, because a
 // line of boilerplate on every session start trains an agent to ignore it.
@@ -383,63 +443,243 @@ func runStatus() int {
 	return 0
 }
 
+// runDashboard serves the live view.
+//
+// It binds to loopback only and has no flag to change that. This page shows a
+// person's development activity, and there is no version of exposing it on a
+// network interface that is worth the convenience.
+func runDashboard(args []string) int {
+	addr := "127.0.0.1:7717"
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--addr", "-addr":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "--addr needs a value like 127.0.0.1:7717")
+				return exitUsage
+			}
+			i++
+			addr = args[i]
+		default:
+			fmt.Fprintf(os.Stderr, "unknown flag %q\n", args[i])
+			return exitUsage
+		}
+	}
+	if host, _, err := net.SplitHostPort(addr); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot parse --addr %q: %v\n", addr, err)
+		return exitUsage
+	} else if !isLoopback(host) {
+		fmt.Fprintf(os.Stderr,
+			"refusing to listen on %q: this page shows your development activity "+
+				"and is served on loopback only\n", host)
+		return exitUsage
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot determine working directory: %v\n", err)
+		return 1
+	}
+	// Fail here rather than serving a page that explains it has no config.
+	if _, err := config.Load(cwd); err != nil {
+		if errors.Is(err, config.ErrNotFound) {
+			fmt.Printf("No %s in this repo or any parent. Run: agentcoord init\n",
+				config.FileName)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+
+	// State is re-read per request, so the page shows the repo as it is now and
+	// the server does not have to be restarted when the config changes.
+	load := func() (dashboard.View, error) {
+		cfg, err := config.Load(cwd)
+		if err != nil {
+			return dashboard.View{}, err
+		}
+		sessions, err := readSessions(cfg)
+		if err != nil {
+			return dashboard.View{}, err
+		}
+		leases, err := readLeases(cfg)
+		if err != nil {
+			return dashboard.View{}, err
+		}
+		return dashboard.Build(cfg, sessions, leases, time.Now()), nil
+	}
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           dashboard.Handler(load),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	fmt.Printf("agentcoord dashboard on http://%s\n", addr)
+	if err := srv.ListenAndServe(); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func readSessions(cfg *config.Config) ([]*session.Session, error) {
+	store, err := session.Open(cfg.Root)
+	if err != nil {
+		return nil, err
+	}
+	return store.Active()
+}
+
+func readLeases(cfg *config.Config) ([]*lease.Lease, error) {
+	store, err := lease.Open(cfg.Root)
+	if err != nil {
+		// Leases are unavailable on platforms without an advisory lock. The rest
+		// of the page is still worth showing.
+		return nil, nil
+	}
+	return store.Active()
+}
+
+func isLoopback(host string) bool {
+	if host == "localhost" || host == "" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 const starterConfig = `{
   "teams": {
     "backend": {
       "owns": ["src/api/**", "src/services/**", "migrations/**"],
+      "shared": ["src/types/**", "openapi.yaml"],
       "agents": ["claude"]
     },
     "frontend": {
       "owns": ["src/components/**", "src/pages/**", "styles/**"],
-      "shared": ["src/types/**", "openapi.yaml"],
       "agents": ["codex"]
     }
   }
 }
 `
 
-// runInit writes a starter declaration and never overwrites anything. Wiring the
-// hooks into each agent's settings means merging into files the user owns, so
-// this prints what to add rather than editing them behind their back.
-func runInit() int {
+// runInit wires the hooks into each agent's settings, merging rather than
+// replacing, and reports exactly which files it changed. Nothing is silent:
+// these are files the user owns.
+func runInit(args []string) int {
+	var dryRun, uninstall bool
+	for _, a := range args {
+		switch a {
+		case "--dry-run", "-dry-run", "-n":
+			dryRun = true
+		case "--uninstall", "-uninstall":
+			uninstall = true
+		default:
+			fmt.Fprintf(os.Stderr, "unknown flag %q\n", a)
+			return exitUsage
+		}
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot determine working directory: %v\n", err)
+		return 1
+	}
+
+	if uninstall {
+		return uninstallHooks(cwd, dryRun)
+	}
+
 	if _, err := os.Stat(config.FileName); err == nil {
-		fmt.Printf("%s already exists, leaving it alone.\n", config.FileName)
+		fmt.Printf("%s exists, leaving it alone\n", config.FileName)
+	} else if dryRun {
+		fmt.Printf("would write %s\n", config.FileName)
 	} else if err := os.WriteFile(config.FileName, []byte(starterConfig), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "write %s: %v\n", config.FileName, err)
 		return 1
 	} else {
-		fmt.Printf("wrote %s - edit it so the territories match this repo\n",
-			config.FileName)
+		fmt.Printf("wrote %s, edit it so the territories match this repo\n", config.FileName)
 	}
 
 	exe, err := os.Executable()
 	if err != nil {
-		exe = "agentcoord"
+		fmt.Fprintf(os.Stderr, "cannot determine my own path: %v\n", err)
+		return 1
 	}
+
+	failed := false
+	for _, target := range install.Plan(cwd) {
+		change, err := install.Apply(target, exe, dryRun)
+		if err != nil {
+			// One agent's settings being unreadable must not stop the other from
+			// being wired up.
+			fmt.Fprintf(os.Stderr, "%s: %v\n", target.Agent, err)
+			failed = true
+			continue
+		}
+		switch {
+		case !change.Changed():
+			fmt.Printf("%s: already wired up\n", target.Agent)
+		case dryRun:
+			fmt.Printf("%s: would add %s to %s\n",
+				target.Agent, strings.Join(change.Added, ", "), rel(cwd, change.File))
+		default:
+			fmt.Printf("%s: added %s to %s\n",
+				target.Agent, strings.Join(change.Added, ", "), rel(cwd, change.File))
+			if change.Backup != "" {
+				fmt.Printf("%s: kept a copy of your settings at %s\n",
+					target.Agent, rel(cwd, change.Backup))
+			}
+		}
+	}
+
+	if !dryRun {
+		if added, err := install.Gitignore(cwd, ".agentcoord/"); err != nil {
+			fmt.Fprintf(os.Stderr, "gitignore: %v\n", err)
+		} else if added {
+			fmt.Println("added .agentcoord/ to .gitignore, it is local runtime state")
+		}
+	}
+
 	fmt.Printf(`
-Add .agentcoord/ to .gitignore: leases are local runtime state.
+One step is left and it cannot be done for you. Codex loads project hooks only
+from a trusted project, and skips them silently otherwise. Add this to
+~/.codex/config.toml:
 
-Then wire the hooks. In .claude/settings.json:
+  [projects.%q]
+  trust_level = "trusted"
 
-  {"hooks":{
-    "SessionStart":[{"hooks":[{"type":"command","command":"%[1]s hook SessionStart claude"}]}],
-    "PreToolUse":[{"matcher":"Write|Edit|Bash","hooks":[{"type":"command","command":"%[1]s hook PreToolUse claude"}]}],
-    "PostToolUse":[{"matcher":"Write|Edit","hooks":[{"type":"command","command":"%[1]s hook PostToolUse claude"}]}],
-    "SessionEnd":[{"hooks":[{"type":"command","command":"%[1]s hook SessionEnd claude"}]}]
-  }}
+Then: agentcoord status, and agentcoord dashboard to watch.
+`, cwd)
+	if failed {
+		return 1
+	}
+	return 0
+}
 
-In .codex/hooks.json:
-
-  {"hooks":{
-    "SessionStart":[{"hooks":[{"type":"command","command":"%[1]s hook SessionStart codex"}]}],
-    "PreToolUse":[{"hooks":[{"type":"command","command":"%[1]s hook PreToolUse codex"}]}],
-    "PostToolUse":[{"hooks":[{"type":"command","command":"%[1]s hook PostToolUse codex"}]}]
-  }}
-
-Codex only loads project hooks from a trusted project. Trust this repo in
-~/.codex/config.toml, or the hooks are silently skipped. Codex exposes no
-session-end event, so its leases are freed by the time to live rather than
-on exit.
-`, exe)
+func uninstallHooks(root string, dryRun bool) int {
+	failed := false
+	for _, target := range install.Plan(root) {
+		change, err := install.Remove(target, dryRun)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", target.Agent, err)
+			failed = true
+			continue
+		}
+		switch {
+		case !change.Changed():
+			fmt.Printf("%s: nothing of ours to remove\n", target.Agent)
+		case dryRun:
+			fmt.Printf("%s: would remove %s from %s\n",
+				target.Agent, strings.Join(change.Removed, ", "), rel(root, change.File))
+		default:
+			fmt.Printf("%s: removed %s from %s\n",
+				target.Agent, strings.Join(change.Removed, ", "), rel(root, change.File))
+		}
+	}
+	fmt.Printf("\n%s and .agentcoord/ are left in place. Delete them if you are done.\n",
+		config.FileName)
+	if failed {
+		return 1
+	}
 	return 0
 }

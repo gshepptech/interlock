@@ -99,6 +99,11 @@ func (c *Config) TeamFor(agent string) string {
 	return ""
 }
 
+// AgentsFor returns the agents that default into a team, for display.
+func (c *Config) AgentsFor(team string) []string {
+	return c.file.Teams[team].Agents
+}
+
 // Summary describes the territory map for injection into an agent's context at
 // session start. It is prose because the consumer is a language model.
 func (c *Config) Summary(team string) string {
