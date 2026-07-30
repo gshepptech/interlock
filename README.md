@@ -5,16 +5,16 @@ without overwriting each other.
 
 You start Claude Code in one terminal and Codex in another, yourself, in one
 shared checkout. Each one is told what it owns and who else is here. If either
-tries to write outside its territory, the write is blocked and the agent is told
-why, so it redirects instead of failing.
+tries to write outside its territory, or onto a shared file another agent is
+holding, the write is blocked and the agent is told why, so it redirects instead
+of failing.
 
-No orchestrator. Neither agent is launched or owned by this tool.
+No orchestrator. Neither agent is launched or owned by this tool. No worktrees.
 
 ## Status
 
 Working and verified end to end against Claude Code and Codex on one machine.
-Not finished. See [what is not built yet](#what-is-not-built-yet) before relying
-on it.
+See [what is not built yet](#what-is-not-built-yet) before relying on it.
 
 ## Why this exists
 
@@ -29,14 +29,24 @@ that instruction, enforced.
 
 ## How it works
 
-Three mechanisms, both agents, verified:
+Hooks, not MCP. An MCP tool only runs if the model decides to call it; a hook
+runs whether the model cooperates or not.
 
-1. **Hooks fire deterministically.** Unlike an MCP tool, a hook does not depend
-   on the model choosing to call it.
-2. **`SessionStart` injects context.** Each agent is told its team, the
-   territory map, and that other agents may be live.
-3. **`PreToolUse` blocks a write** with exit code 2, and the agent reads the
-   reason and adapts.
+**Territory** is the cheap layer. Most collisions are not subtle races over one
+file, they are two teams in a directory they were never meant to share.
+Declaring who owns what removes those with no runtime state and no locking.
+
+**Leases** cover what is left: the few files both teams legitimately need, like
+the type definitions or the API contract. One holder at a time, renewed on every
+touch, released on a tidy exit, expiring after three minutes otherwise.
+
+One property shapes the lease design: **an agent cannot wait.** There is no way
+to park a tool call and resume it when a lock frees, so a held file produces a
+redirect ("someone else has this, go and do something else") and never a queue.
+
+**Shell scanning** closes the obvious bypass. Territory enforced only at the edit
+tool would be sidestepped by `sed -i`, so shell commands are scanned for the
+paths they are likely to write.
 
 ## Try it
 
@@ -44,7 +54,7 @@ Three mechanisms, both agents, verified:
 go build -o bin/agentcoord ./cmd/agentcoord
 cd /your/repo
 /path/to/bin/agentcoord init      # writes .agentcoord.json, prints hook wiring
-/path/to/bin/agentcoord status    # shows the territory map
+/path/to/bin/agentcoord status    # territory, plus who holds what right now
 ```
 
 Territory is declared per repo in `.agentcoord.json`:
@@ -52,64 +62,97 @@ Territory is declared per repo in `.agentcoord.json`:
 ```json
 {
   "teams": {
-    "backend":  { "owns": ["src/api/**", "migrations/**"], "agents": ["claude"] },
-    "frontend": { "owns": ["src/components/**"], "shared": ["src/types/**"], "agents": ["codex"] }
+    "backend":  { "owns": ["src/api/**", "migrations/**"], "shared": ["src/types/**"], "agents": ["claude"] },
+    "frontend": { "owns": ["src/components/**"], "agents": ["codex"] }
   }
 }
 ```
 
 A team can span vendors. Two Claude sessions and a Codex session can all be
-`backend`. Set `AGENTCOORD_TEAM` to place one session on a team other than its
+`backend`. Set `AGENTCOORD_TEAM` to put one session on a team other than its
 agent's default.
+
+Add `.agentcoord/` to `.gitignore`. Leases are local runtime state.
 
 ### Codex needs the repo trusted
 
 Codex loads project-local `.codex/hooks.json` only for a trusted project. Add a
 `projects."<path>".trust_level = "trusted"` entry to `~/.codex/config.toml`, or
-the hooks are skipped without saying so.
+the hooks are skipped without saying so. Codex also exposes no session-end event,
+so its leases are freed by the time to live rather than on exit.
 
 ## The verification that matters
 
-Both agents were told to create one file in their own territory and one in the
-other team's, in the same checkout.
+All four run against real Claude Code and Codex sessions in one shared checkout.
+
+**Territory, both directions:**
 
 | Agent | Team | Own territory | Other team's territory |
 | --- | --- | --- | --- |
 | Claude Code | backend | `src/api/users.go` created | `src/components/Button.tsx` blocked |
 | Codex | frontend | `src/components/Card.tsx` created | `src/api/orders.go` blocked |
 
-Codex, in its own words: "`src/api/orders.go`: not created because `src/api/**`
-is backend-owned and outside my frontend territory."
+**Leases, across vendors.** Claude took `src/types/api.ts` and kept it. Codex,
+asked to edit the same file, said:
+
+> `src/types/api.ts` is currently leased by the backend team, agent `claude`,
+> session `70197b4e`. Because I am on the frontend team and the shared file is
+> already held by backend, I left the file unchanged.
+
+**The shell bypass.** Claude, on backend, told to use `sed` on a frontend file,
+was blocked and offered to hand the work to the owning team instead. The file was
+unchanged.
+
+The point is not that the writes failed. It is that both agents read the reason
+and reasoned about it. That is awareness, not an error message.
 
 ## Design rules
 
 - **This tool must never be the reason someone's work stopped.** A territory
-  violation is the only thing that blocks. An unreadable payload, an unparseable
-  config, or no config at all allows the call and says so on stderr. Allowing
-  costs a collision the user could already have had. Blocking on our own bug
-  costs a session that cannot write to its own repo.
+  violation and a held lease are the only things that block. An unreadable
+  payload, a broken config, or no config at all allows the call and says so on
+  stderr. Allowing costs a collision the user could already have had. Blocking on
+  our own bug costs a session that cannot write to its own repo.
 - **Nothing vendor-specific escapes `internal/hookio`.** Everything downstream
   works on one normalised `Event`.
+- **Reads never mutate.** `Active` skips expired leases without deleting them, so
+  a reader and a writer never contend and the dashboard needs no lock.
 - **Zero runtime dependencies.** A hook runs on every tool call, so the artifact
   is one static binary with nothing to resolve at startup. That is also why this
   is Go and not Node: process start is on the hot path.
+
+## Two bugs worth recording
+
+**The pid trap.** Leases first reclaimed any lease whose recorded process had
+exited, to recover quickly from a crash. A cross-process test found that this
+made every lease stealable: the hook is a short-lived process that exits
+milliseconds after acquiring, so its pid is always dead. Three of twelve racing
+processes were each granted the same file. Liveness is now the time to live
+alone, and `Lease.PID` is informational only. The in-process race test passed
+throughout, which is why `crossprocess_test.go` exists.
+
+**flock, not a lock file.** A lock file is state that outlives the process that
+made it, so a crash leaves a stale lock and the next run deadlocks. An flock is
+held by the kernel on behalf of an open descriptor and is released when the
+process dies for any reason. It is held for microseconds around the
+read-decide-write section of `Acquire`, never across an agent's tool call.
 
 ## What is not built yet
 
 Stated plainly, because a coordination tool that implies coverage it does not
 have is worse than none.
 
-- **Leases on shared files.** `shared` paths are declared and reported, but
-  nothing yet serialises access to them. Two agents can both enter
-  `src/types/**` right now. This is the next piece.
-- **Shell edits are not covered.** An agent can edit any file with `sed` and
-  bypass territory entirely. The hook says so on stderr when it sees an
-  unchecked shell command rather than staying quiet about the hole.
-- **No presence.** `SessionStart` injects the territory map but not who is
-  actually live, because there is no lease store to read yet.
-- **No dashboard.** The read model comes after there is state worth reading.
+- **Opaque shell writes are reported, not blocked.** When a command writes
+  somewhere that cannot be read off the command line, a variable, a subshell,
+  `xargs`, or an interpreter like `python3`, the hook says so on stderr and allows
+  it. Blocking every such command would stop normal work. This is the one hole
+  left.
+- **No dashboard.** `status` is the whole read model today.
 - **Claude Code and Codex only.** Cursor and Gemini CLI both have hooks and
   should slot into `hookio` without touching anything else.
+- **Unix only.** Leases need an advisory lock the kernel releases on process
+  death. Windows would need `LockFileEx`; the build fails loudly rather than
+  degrading into a racing no-op.
 - **`init` does not edit agent settings.** It prints what to add. Merging into
   files the user owns is not something to do behind their back.
 
@@ -119,6 +162,8 @@ have is worse than none.
 cmd/agentcoord/       CLI: hook, status, init
 internal/hookio/      payload normalisation, the only vendor-aware code
 internal/territory/   path globs to team ownership
+internal/lease/       one holder at a time on shared files
+internal/shellscan/   paths a shell command is likely to write
 internal/config/      per-repo .agentcoord.json
 ```
 

@@ -1,10 +1,10 @@
 // Command agentcoord lets coding agents from different vendors work one repo
 // without overwriting each other.
 //
-// It is invoked as a hook by each agent. On SessionStart it tells the agent who
-// else is here and what it owns. On PreToolUse it blocks a write that lands in
-// another team's territory, and explains why, so the agent redirects instead of
-// failing.
+// It is invoked as a hook by each agent. On SessionStart it tells the agent what
+// it owns and who else is here. On PreToolUse it blocks a write that lands in
+// another team's territory, or on a shared file another agent currently holds,
+// and explains why, so the agent redirects instead of failing.
 package main
 
 import (
@@ -13,20 +13,24 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"agentcoord/internal/config"
 	"agentcoord/internal/hookio"
+	"agentcoord/internal/lease"
+	"agentcoord/internal/shellscan"
 	"agentcoord/internal/territory"
 )
 
 const usage = `agentcoord - keep coding agents out of each other's way
 
   agentcoord hook <event> <agent>   run as an agent hook (reads payload on stdin)
-  agentcoord status                 show the territory map for this repo
-  agentcoord init                   write starter config and hook wiring
+  agentcoord status                 show territory and who holds what
+  agentcoord init                   write starter config and print hook wiring
 
-Events: SessionStart, PreToolUse, PostToolUse
+Events: SessionStart, PreToolUse, PostToolUse, SessionEnd, Stop
 Agents: claude, codex
 `
 
@@ -62,11 +66,12 @@ func main() {
 }
 
 // runHook is the hot path. Its one hard rule: this tool must never be the reason
-// someone's work stopped. A territory violation is the only thing that blocks.
-// Anything else that goes wrong, a payload we cannot read, a config we cannot
-// parse, a repo with no config at all, allows the call and says so on stderr.
-// The cost of allowing is a collision the user could already have had. The cost
-// of blocking on our own bug is a session that cannot write to its own repo.
+// someone's work stopped. A territory violation and a held lease are the only
+// things that block. Anything else that goes wrong, a payload we cannot read, a
+// config we cannot parse, a repo with no config at all, allows the call and says
+// so on stderr. The cost of allowing is a collision the user could already have
+// had. The cost of blocking on our own bug is a session that cannot write to its
+// own repo.
 func runHook(args []string) int {
 	if len(args) < 2 {
 		fmt.Fprint(os.Stderr, "usage: agentcoord hook <event> <agent>\n")
@@ -83,14 +88,20 @@ func runHook(args []string) int {
 	if err != nil {
 		return allow("could not parse hook payload: %v", err)
 	}
-	// The hook config names the event; the payload also carries it. Trust the
-	// argument, since a matcher can fire a hook for an event the payload labels
-	// differently and the config is the thing we control.
 	if ev.Name == "" {
 		ev.Name = event
 	}
 
-	cfg, err := config.Load(ev.CWD)
+	cwd := ev.CWD
+	if cwd == "" {
+		// Some events carry no cwd. Falling back to ours is right, because the
+		// agent spawned us in its own working directory.
+		if cwd, err = os.Getwd(); err != nil {
+			return allow("no cwd in payload and cannot determine ours: %v", err)
+		}
+	}
+
+	cfg, err := config.Load(cwd)
 	if errors.Is(err, config.ErrNotFound) {
 		// Not configured. Behave exactly as if this tool were not installed.
 		return exitOK
@@ -103,25 +114,72 @@ func runHook(args []string) int {
 
 	switch event {
 	case "SessionStart":
-		emitContext(cfg.Summary(team))
+		emitContext(cfg.Summary(team) + presence(cfg, ev.SessionID))
 		return exitOK
 	case "PreToolUse":
-		return checkWrite(cfg, team, ev)
+		return checkWrite(cfg, team, agent, ev)
+	case "PostToolUse":
+		renew(cfg, team, agent, ev)
+		return exitOK
+	case "SessionEnd", "Stop":
+		release(cfg, ev.SessionID)
+		return exitOK
 	default:
 		return exitOK
 	}
 }
 
-// checkWrite blocks the call if any file it touches belongs to another team.
+// checkWrite decides whether a tool call may proceed.
+//
 // Every file is checked, not just the first: one Codex patch can touch several,
 // and stopping at the first allowed one would wave the rest through.
-func checkWrite(cfg *config.Config, team string, ev *hookio.Event) int {
+func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.Event) int {
 	if team == "" {
 		// This session declared no team, so there is nothing to enforce against.
 		return exitOK
 	}
 
-	for _, file := range ev.Files {
+	files := ev.Files
+	if len(files) == 0 && ev.Command != "" {
+		found := shellscan.Scan(ev.Command)
+		switch found.Confidence {
+		case shellscan.None:
+			return exitOK
+		case shellscan.Opaque:
+			// Something writes and nothing on the command line says where.
+			// Blocking every such command would stop `python3 build.py`, which
+			// is normal work, so this reports and allows. It is the one hole
+			// left, and saying so beats implying coverage.
+			fmt.Fprintf(os.Stderr,
+				"agentcoord: this command writes somewhere it cannot be read from "+
+					"the command line (%s). Territory is not enforced for it. "+
+					"Stay inside %q.\n", found.Reason, team)
+			return exitOK
+		case shellscan.Likely:
+			files = absAll(ev.CWD, found.Paths)
+		}
+	}
+
+	if len(files) == 0 {
+		return exitOK
+	}
+
+	store, err := lease.Open(cfg.Root)
+	if err != nil {
+		// Without leases, territory still works. Enforce what we can.
+		fmt.Fprintf(os.Stderr, "agentcoord: leases unavailable (%v), "+
+			"territory still enforced\n", err)
+		store = nil
+	}
+
+	holder := lease.Holder{
+		Team:      team,
+		Agent:     string(agent),
+		SessionID: ev.SessionID,
+		PID:       os.Getpid(),
+	}
+
+	for _, file := range files {
 		decision, pattern, err := cfg.Map.Check(team, file)
 		if err != nil {
 			// Either the path is outside the repo, which is not ours to police,
@@ -129,27 +187,101 @@ func checkWrite(cfg *config.Config, team string, ev *hookio.Event) int {
 			// for stopping the user; say it and move on.
 			return allow("%v", err)
 		}
-		if decision != territory.Denied {
-			continue
-		}
-		owner := cfg.Map.Owner(file)
-		fmt.Fprintf(os.Stderr,
-			"Blocked by agentcoord: %s belongs to the %q team (matched %q), "+
-				"and you are on %q. Another agent may be working there right now. "+
-				"Work inside your own territory, or ask for this file to be shared.\n",
-			rel(cfg.Root, file), owner, pattern, team)
-		return exitBlock
-	}
 
-	// A shell command could touch anything, and we deliberately do not guess
-	// which paths are in it. Saying so is more honest than implying coverage
-	// this version does not have.
-	if ev.Command != "" && len(ev.Files) == 0 {
-		fmt.Fprintf(os.Stderr,
-			"agentcoord: shell command not checked against territory. "+
-				"Files edited through the shell are not yet covered.\n")
+		switch decision {
+		case territory.Denied:
+			fmt.Fprintf(os.Stderr,
+				"Blocked by agentcoord: %s belongs to the %q team (matched %q), "+
+					"and you are on %q. Another agent may be working there right now. "+
+					"Work inside your own territory, or ask for this file to be shared.\n",
+				rel(cfg.Root, file), cfg.Map.Owner(file), pattern, team)
+			return exitBlock
+
+		case territory.Shared:
+			if store == nil {
+				continue
+			}
+			relPath := rel(cfg.Root, file)
+			granted, current, err := store.Acquire(relPath, holder)
+			if err != nil {
+				return allow("could not take a lease on %s: %v", relPath, err)
+			}
+			if !granted {
+				fmt.Fprintf(os.Stderr,
+					"Blocked by agentcoord: %s. It is a shared file, so only one "+
+						"agent may hold it at a time. Work on something else and come "+
+						"back to it, or ask the holder to finish.\n",
+					current.Describe(time.Now()))
+				return exitBlock
+			}
+		}
 	}
 	return exitOK
+}
+
+// renew extends the leases this session holds on the files it just touched, so a
+// file under active work never expires beneath its holder.
+func renew(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.Event) {
+	if team == "" || len(ev.Files) == 0 {
+		return
+	}
+	store, err := lease.Open(cfg.Root)
+	if err != nil {
+		return
+	}
+	holder := lease.Holder{
+		Team: team, Agent: string(agent),
+		SessionID: ev.SessionID, PID: os.Getpid(),
+	}
+	for _, file := range ev.Files {
+		decision, _, err := cfg.Map.Check(team, file)
+		if err != nil || decision != territory.Shared {
+			continue
+		}
+		// Errors are ignored on purpose: a failed renewal costs the lease its
+		// time to live, and there is nothing useful to tell the agent.
+		store.Acquire(rel(cfg.Root, file), holder)
+	}
+}
+
+// release frees this session's shared files on a tidy exit, rather than making
+// the next agent wait out the time to live.
+func release(cfg *config.Config, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	store, err := lease.Open(cfg.Root)
+	if err != nil {
+		return
+	}
+	store.Release(sessionID)
+}
+
+// presence describes the other agents currently holding shared files, for
+// injection at session start. Nothing is said when the repo is quiet, because a
+// line of boilerplate on every session start trains an agent to ignore it.
+func presence(cfg *config.Config, ownSession string) string {
+	store, err := lease.Open(cfg.Root)
+	if err != nil {
+		return ""
+	}
+	active, err := store.Active()
+	if err != nil || len(active) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	now := time.Now()
+	for _, l := range active {
+		if l.SessionID == ownSession {
+			continue
+		}
+		fmt.Fprintf(&b, "\n  - %s", l.Describe(now))
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return "\n\nShared files currently held by other agents:" + b.String()
 }
 
 // emitContext returns text both agents inject into the model's context. The
@@ -183,6 +315,18 @@ func rel(root, path string) string {
 	return path
 }
 
+func absAll(cwd string, paths []string) []string {
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if filepath.IsAbs(p) {
+			out = append(out, filepath.Clean(p))
+			continue
+		}
+		out = append(out, filepath.Join(cwd, p))
+	}
+	return out
+}
+
 func runStatus() int {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -214,6 +358,27 @@ func runStatus() int {
 		if team := cfg.TeamFor(agent); team != "" {
 			fmt.Printf("\n%s defaults to team %q\n", agent, team)
 		}
+	}
+
+	store, err := lease.Open(cfg.Root)
+	if err != nil {
+		fmt.Printf("\nleases unavailable: %v\n", err)
+		return 0
+	}
+	active, err := store.Active()
+	if err != nil {
+		fmt.Printf("\ncannot read leases: %v\n", err)
+		return 0
+	}
+	fmt.Println()
+	if len(active) == 0 {
+		fmt.Println("no shared files held right now")
+		return 0
+	}
+	now := time.Now()
+	fmt.Println("held right now:")
+	for _, l := range active {
+		fmt.Printf("  %s\n", l.Describe(now))
 	}
 	return 0
 }
@@ -252,22 +417,29 @@ func runInit() int {
 		exe = "agentcoord"
 	}
 	fmt.Printf(`
-Next, wire the hooks. Add to .claude/settings.json:
+Add .agentcoord/ to .gitignore: leases are local runtime state.
+
+Then wire the hooks. In .claude/settings.json:
 
   {"hooks":{
-    "SessionStart":[{"hooks":[{"type":"command","command":"%s hook SessionStart claude"}]}],
-    "PreToolUse":[{"matcher":"Write|Edit","hooks":[{"type":"command","command":"%s hook PreToolUse claude"}]}]
+    "SessionStart":[{"hooks":[{"type":"command","command":"%[1]s hook SessionStart claude"}]}],
+    "PreToolUse":[{"matcher":"Write|Edit|Bash","hooks":[{"type":"command","command":"%[1]s hook PreToolUse claude"}]}],
+    "PostToolUse":[{"matcher":"Write|Edit","hooks":[{"type":"command","command":"%[1]s hook PostToolUse claude"}]}],
+    "SessionEnd":[{"hooks":[{"type":"command","command":"%[1]s hook SessionEnd claude"}]}]
   }}
 
-and to .codex/hooks.json:
+In .codex/hooks.json:
 
   {"hooks":{
-    "SessionStart":[{"hooks":[{"type":"command","command":"%s hook SessionStart codex"}]}],
-    "PreToolUse":[{"hooks":[{"type":"command","command":"%s hook PreToolUse codex"}]}]
+    "SessionStart":[{"hooks":[{"type":"command","command":"%[1]s hook SessionStart codex"}]}],
+    "PreToolUse":[{"hooks":[{"type":"command","command":"%[1]s hook PreToolUse codex"}]}],
+    "PostToolUse":[{"hooks":[{"type":"command","command":"%[1]s hook PostToolUse codex"}]}]
   }}
 
 Codex only loads project hooks from a trusted project. Trust this repo in
-~/.codex/config.toml, or the hooks are silently skipped.
-`, exe, exe, exe, exe)
+~/.codex/config.toml, or the hooks are silently skipped. Codex exposes no
+session-end event, so its leases are freed by the time to live rather than
+on exit.
+`, exe)
 	return 0
 }
