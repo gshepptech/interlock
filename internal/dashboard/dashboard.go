@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"agentcoord/internal/config"
+	"agentcoord/internal/journal"
 	"agentcoord/internal/lease"
 	"agentcoord/internal/session"
 )
@@ -28,6 +29,9 @@ type View struct {
 	Teams       []TeamView
 	Sessions    []SessionView
 	Leases      []LeaseView
+	Events      []EventView
+	Prevented   int
+	Escaped     int
 	GeneratedAt string
 	RefreshSecs int
 	Warning     string
@@ -58,6 +62,18 @@ type TouchView struct {
 	Ago  string
 }
 
+// EventView is one thing the tool did, for the feed that makes its work visible.
+type EventView struct {
+	Ago     string
+	Kind    string
+	Label   string
+	Path    string
+	Agent   string
+	Team    string
+	Detail  string
+	Escaped bool
+}
+
 type LeaseView struct {
 	Path    string
 	Team    string
@@ -68,7 +84,8 @@ type LeaseView struct {
 
 // Build assembles the view. It takes already-loaded state rather than reading it
 // so the assembly is testable without a repo on disk.
-func Build(cfg *config.Config, sessions []*session.Session, leases []*lease.Lease, now time.Time) View {
+func Build(cfg *config.Config, sessions []*session.Session, leases []*lease.Lease,
+	events []journal.Entry, now time.Time) View {
 	v := View{
 		Root:        cfg.Root,
 		GeneratedAt: now.Format("15:04:05"),
@@ -118,9 +135,33 @@ func Build(cfg *config.Config, sessions []*session.Session, leases []*lease.Leas
 		})
 	}
 
+	for _, e := range events {
+		ev := EventView{
+			Ago: since(now, e.At), Kind: string(e.Kind), Path: e.Path,
+			Agent: e.Agent, Team: e.Team, Detail: e.Detail,
+		}
+		switch e.Kind {
+		case journal.BlockedTerritory:
+			ev.Label = "blocked, wrong territory"
+			v.Prevented++
+		case journal.BlockedLease:
+			ev.Label = "blocked, file held"
+			v.Prevented++
+		case journal.EscapedGuard:
+			// Counted apart from the blocks and marked, because this is the
+			// tool reporting its own miss. Folding it in with the successes
+			// would be the page flattering itself.
+			ev.Label = "got through, wrong territory"
+			ev.Escaped = true
+			v.Escaped++
+		}
+		v.Events = append(v.Events, ev)
+	}
+
 	if len(v.Sessions) == 0 {
 		v.Warning = "No agent has run here since this tool was installed. " +
-			"Territory is only enforced for agents whose hooks are wired up."
+			"Territory is only enforced for agents whose hooks are wired up. " +
+			"Run agentcoord doctor to check."
 	}
 	return v
 }
@@ -267,6 +308,28 @@ h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .09em;
   {{end}}
 {{else}}
   <p class="empty">Nobody is working here.</p>
+{{end}}
+
+<h2>What this has prevented</h2>
+{{if .Events}}
+  <div class="row" style="margin-bottom:.6rem">
+    <span class="tag hold">{{.Prevented}} collision{{if ne .Prevented 1}}s{{end}} prevented</span>
+    {{if .Escaped}}<span class="tag contend">{{.Escaped}} got through</span>{{end}}
+  </div>
+  {{range .Events}}
+  <div class="card">
+    <div class="row">
+      <code class="grow">{{.Path}}</code>
+      <span class="tag{{if .Escaped}} contend{{else}} hold{{end}}">{{.Label}}</span>
+      <span class="meta">{{.Ago}} ago</span>
+    </div>
+    <div class="paths">{{.Agent}} on {{.Team}}: {{.Detail}}</div>
+  </div>
+  {{end}}
+{{else}}
+  <p class="empty">Nothing has been blocked. Either the agents have stayed in their
+  own territory, or the hooks are not wired up. Run <code>agentcoord doctor</code>
+  to tell the difference.</p>
 {{end}}
 
 <h2>Shared files held</h2>

@@ -26,6 +26,13 @@ import (
 // than on the full path means moving the binary does not orphan its entries.
 const marker = "agentcoord hook"
 
+// claudeWriteTools is every Claude Code tool that can put bytes on disk.
+//
+// Bash belongs here as much as Write does. An agent that shells out to sed, or
+// to a python one-liner, changes the tree exactly as much as one that calls the
+// edit tool, and a guard that watches only the polite route is not a guard.
+const claudeWriteTools = "Write|Edit|MultiEdit|NotebookEdit|Bash"
+
 // Target is one agent's settings file and the hooks that belong in it.
 type Target struct {
 	Agent string
@@ -50,9 +57,14 @@ func Plan(root string) []Target {
 			File:  filepath.Join(root, ".claude", "settings.json"),
 			Events: map[string]string{
 				"SessionStart": "",
-				"PreToolUse":   "Write|Edit|MultiEdit|NotebookEdit|Bash",
-				"PostToolUse":  "Write|Edit|MultiEdit|NotebookEdit",
-				"SessionEnd":   "",
+				"PreToolUse":   claudeWriteTools,
+				// Must match PreToolUse exactly. PreToolUse snapshots the tree
+				// before a shell command whose targets it cannot read, and
+				// PostToolUse is what compares it afterwards. Leaving Bash out
+				// of this one made the whole after-the-fact check silently dead:
+				// the snapshot was armed and nothing ever looked at it.
+				"PostToolUse": claudeWriteTools,
+				"SessionEnd":  "",
 			},
 		},
 		{
@@ -171,6 +183,31 @@ func Remove(t Target, dryRun bool) (Change, error) {
 		delete(doc, "hooks")
 	}
 	return change, write(t.File, doc)
+}
+
+// Installed reports which of the target's events already carry our hook, sorted.
+//
+// This is what makes a half-installed setup visible. A settings file that cannot
+// be parsed is an error rather than an empty list, because "unreadable" and
+// "not installed" call for different fixes.
+func Installed(t Target) ([]string, error) {
+	doc, existed, err := read(t.File)
+	if err != nil || !existed {
+		return nil, err
+	}
+	hooks, ok := doc["hooks"].(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+
+	var wired []string
+	for event := range t.Events {
+		if list, ok := hooks[event].([]any); ok && hasMarker(list) {
+			wired = append(wired, event)
+		}
+	}
+	slices.Sort(wired)
+	return wired, nil
 }
 
 // entry builds one hook entry in the shape both agents accept. The nesting is

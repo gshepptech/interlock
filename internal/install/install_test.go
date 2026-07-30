@@ -253,16 +253,6 @@ func TestRemoveOnAnUntouchedRepoIsANoOp(t *testing.T) {
 	}
 }
 
-// Shelling out to sed must reach the hook, so Bash has to be in the matcher.
-func TestClaudePreToolUseMatcherCoversShellAndEditTools(t *testing.T) {
-	matcher := claudeTarget(t.TempDir()).Events["PreToolUse"]
-	for _, want := range []string{"Write", "Edit", "Bash"} {
-		if !strings.Contains(matcher, want) {
-			t.Errorf("PreToolUse matcher %q does not cover %s", matcher, want)
-		}
-	}
-}
-
 // Codex has no session-end event, so promising one in the plan would install a
 // hook that never fires and imply leases are released on exit.
 func TestCodexPlanHasNoSessionEnd(t *testing.T) {
@@ -336,4 +326,36 @@ func mustJSON(t *testing.T, v any) string {
 		t.Fatalf("marshal: %v", err)
 	}
 	return string(raw)
+}
+
+// The bug this exists to prevent: PreToolUse snapshots the tree before a shell
+// command whose targets cannot be read in advance, and PostToolUse is what
+// compares it afterwards. When PostToolUse left Bash out, the snapshot was armed
+// and nothing ever looked at it, so the whole after-the-fact check was dead
+// while every unit test still passed.
+func TestArmAndVerifyEventsCoverTheSameTools(t *testing.T) {
+	for _, target := range Plan(t.TempDir()) {
+		pre, hasPre := target.Events["PreToolUse"]
+		post, hasPost := target.Events["PostToolUse"]
+		if !hasPre || !hasPost {
+			t.Errorf("%s: needs both PreToolUse and PostToolUse, has pre=%v post=%v",
+				target.Agent, hasPre, hasPost)
+			continue
+		}
+		if pre != post {
+			t.Errorf("%s: PreToolUse matcher %q does not match PostToolUse %q. "+
+				"Anything armed by one and not seen by the other is never checked.",
+				target.Agent, pre, post)
+		}
+	}
+}
+
+// Every tool that can write has to reach the guard, whichever route it takes.
+func TestClaudeMatcherCoversEveryWritingTool(t *testing.T) {
+	matcher := claudeTarget(t.TempDir()).Events["PreToolUse"]
+	for _, tool := range []string{"Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"} {
+		if !strings.Contains(matcher, tool) {
+			t.Errorf("matcher %q does not cover %s", matcher, tool)
+		}
+	}
 }

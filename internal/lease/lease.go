@@ -23,6 +23,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"agentcoord/internal/lockfile"
 )
 
 // DefaultTTL is how long a lease survives without being renewed. It has to
@@ -63,15 +65,9 @@ type Store struct {
 	now func() time.Time
 }
 
-// ErrUnsupported reports that this platform has no usable advisory lock.
-//
-// Leases need a lock whose release does not depend on the process cooperating,
-// so a crashed agent cannot wedge the repo. That is flock on unix. Failing at
-// construction is deliberate: a silent no-op would make Acquire race, and a
-// coordination tool that quietly stops coordinating is worse than one that
-// refuses to start.
-var ErrUnsupported = errors.New(
-	"lease coordination is only implemented on unix; Windows support is not built yet")
+// ErrUnsupported is re-exported so callers can check it without importing the
+// lock package directly.
+var ErrUnsupported = lockfile.ErrUnsupported
 
 // Open prepares the lease directory under root. The directory is created on
 // demand, so a repo that never contends never grows one.
@@ -93,7 +89,7 @@ func open(root string, ttl time.Duration, now func() time.Time) (*Store, error) 
 // the same session renews rather than refusing, because an agent editing a file
 // across several tool calls in one turn is the normal case, not contention.
 func (s *Store) Acquire(path string, h Holder) (granted bool, current *Lease, err error) {
-	unlock, err := lockFile(filepath.Join(s.dir, ".lock"))
+	unlock, err := lockfile.Acquire(filepath.Join(s.dir, ".lock"))
 	if err != nil {
 		return false, nil, err
 	}
@@ -140,7 +136,7 @@ func (s *Store) Acquire(path string, h Holder) (granted bool, current *Lease, er
 // Release drops every lease held by a session. Called when a session ends, so a
 // tidy exit frees contract files immediately instead of after the time to live.
 func (s *Store) Release(sessionID string) (int, error) {
-	unlock, err := lockFile(filepath.Join(s.dir, ".lock"))
+	unlock, err := lockfile.Acquire(filepath.Join(s.dir, ".lock"))
 	if err != nil {
 		return 0, err
 	}

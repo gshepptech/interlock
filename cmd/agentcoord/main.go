@@ -8,6 +8,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,9 +23,12 @@ import (
 
 	"agentcoord/internal/config"
 	"agentcoord/internal/dashboard"
+	"agentcoord/internal/gitstate"
 	"agentcoord/internal/hookio"
 	"agentcoord/internal/install"
+	"agentcoord/internal/journal"
 	"agentcoord/internal/lease"
+	"agentcoord/internal/remedy"
 	"agentcoord/internal/session"
 	"agentcoord/internal/shellscan"
 	"agentcoord/internal/territory"
@@ -33,6 +38,7 @@ const usage = `agentcoord - keep coding agents out of each other's way
 
   agentcoord hook <event> <agent>   run as an agent hook (reads payload on stdin)
   agentcoord status                 show territory and who holds what
+  agentcoord doctor                 check for the ways this silently fails
   agentcoord dashboard [--addr A]   serve a live view on 127.0.0.1 (default :7717)
   agentcoord init [--dry-run]       wire the hooks into each agent's settings
   agentcoord init --uninstall       take them back out
@@ -61,6 +67,8 @@ func main() {
 		os.Exit(runHook(args[1:]))
 	case "status":
 		os.Exit(runStatus())
+	case "doctor":
+		os.Exit(runDoctor())
 	case "dashboard":
 		os.Exit(runDashboard(args[1:]))
 	case "init":
@@ -133,10 +141,12 @@ func runHook(args []string) int {
 		note(cfg, ev, team, agent)
 		recordTouches(cfg, ev)
 		renew(cfg, team, agent, ev)
+		verifyAfter(cfg, team, agent, ev)
 		return exitOK
 	case "SessionEnd", "Stop":
 		release(cfg, ev.SessionID)
 		endSession(cfg, ev.SessionID)
+		clearRemedy(cfg, ev.SessionID)
 		return exitOK
 	default:
 		note(cfg, ev, team, agent)
@@ -163,12 +173,16 @@ func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.
 		case shellscan.Opaque:
 			// Something writes and nothing on the command line says where.
 			// Blocking every such command would stop `python3 build.py`, which
-			// is normal work, so this reports and allows. It is the one hole
-			// left, and saying so beats implying coverage.
-			fmt.Fprintf(os.Stderr,
-				"agentcoord: this command writes somewhere it cannot be read from "+
-					"the command line (%s). Territory is not enforced for it. "+
-					"Stay inside %q.\n", found.Reason, team)
+			// is normal work. Instead the tree is snapshotted now and compared
+			// after the command, so a write that lands outside the territory is
+			// caught and the agent is told to undo it.
+			if !armVerify(cfg, ev.SessionID) {
+				fmt.Fprintf(os.Stderr,
+					"agentcoord: this command writes somewhere that cannot be read "+
+						"from the command line (%s), and this tree cannot be watched "+
+						"(no git), so territory is not enforced for it. Stay inside "+
+						"%q.\n", found.Reason, team)
+			}
 			return exitOK
 		case shellscan.Likely:
 			files = absAll(ev.CWD, found.Paths)
@@ -205,11 +219,26 @@ func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.
 
 		switch decision {
 		case territory.Denied:
+			// A path this session was told to revert has to stay writable by it,
+			// or the tool demands a fix and then blocks the fix. Narrow on
+			// purpose: this exact path, this session, for a short window.
+			if allowedToRemedy(cfg, ev.SessionID, rel(cfg.Root, file)) {
+				fmt.Fprintf(os.Stderr,
+					"agentcoord: allowing this write to %s so you can undo the "+
+						"change you were asked to revert.\n", rel(cfg.Root, file))
+				continue
+			}
+			owner := cfg.Map.Owner(file)
+			record(cfg, journal.Entry{
+				Kind: journal.BlockedTerritory, Agent: string(agent), Team: team,
+				SessionID: ev.SessionID, Path: rel(cfg.Root, file),
+				Detail: fmt.Sprintf("belongs to %q, matched %q", owner, pattern),
+			})
 			fmt.Fprintf(os.Stderr,
 				"Blocked by agentcoord: %s belongs to the %q team (matched %q), "+
 					"and you are on %q. Another agent may be working there right now. "+
 					"Work inside your own territory, or ask for this file to be shared.\n",
-				rel(cfg.Root, file), cfg.Map.Owner(file), pattern, team)
+				rel(cfg.Root, file), owner, pattern, team)
 			return exitBlock
 
 		case territory.Shared:
@@ -222,6 +251,12 @@ func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.
 				return allow("could not take a lease on %s: %v", relPath, err)
 			}
 			if !granted {
+				record(cfg, journal.Entry{
+					Kind: journal.BlockedLease, Agent: string(agent), Team: team,
+					SessionID: ev.SessionID, Path: relPath,
+					Detail: fmt.Sprintf("held by %q since %s ago", current.Team,
+						time.Since(current.Acquired).Round(time.Second)),
+				})
 				fmt.Fprintf(os.Stderr,
 					"Blocked by agentcoord: %s. It is a shared file, so only one "+
 						"agent may hold it at a time. Work on something else and come "+
@@ -505,7 +540,7 @@ func runDashboard(args []string) int {
 		if err != nil {
 			return dashboard.View{}, err
 		}
-		return dashboard.Build(cfg, sessions, leases, time.Now()), nil
+		return dashboard.Build(cfg, sessions, leases, readEvents(cfg), time.Now()), nil
 	}
 
 	srv := &http.Server{
@@ -537,6 +572,20 @@ func readLeases(cfg *config.Config) ([]*lease.Lease, error) {
 		return nil, nil
 	}
 	return store.Active()
+}
+
+// readEvents is best-effort: an unreadable journal costs the page its activity
+// feed and must not cost it the rest.
+func readEvents(cfg *config.Config) []journal.Entry {
+	store, err := journal.Open(cfg.Root)
+	if err != nil {
+		return nil
+	}
+	events, err := store.Recent(25)
+	if err != nil {
+		return nil
+	}
+	return events
 }
 
 func isLoopback(host string) bool {
@@ -682,4 +731,279 @@ func uninstallHooks(root string, dryRun bool) int {
 		return 1
 	}
 	return 0
+}
+
+// pendingDir holds the snapshot taken before a command whose targets could not
+// be read off the command line.
+func pendingDir(root string) string {
+	return filepath.Join(root, ".agentcoord", "pending")
+}
+
+func pendingFile(root, sessionID string) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return filepath.Join(pendingDir(root), hex.EncodeToString(sum[:16])+".json")
+}
+
+// armVerify snapshots the working tree so the next PostToolUse can tell what the
+// command actually wrote. It reports whether the tree can be watched at all.
+func armVerify(cfg *config.Config, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	snap, err := gitstate.Take(cfg.Root)
+	if err != nil {
+		return false
+	}
+	enc, err := json.Marshal(snap)
+	if err != nil {
+		return false
+	}
+	if err := os.MkdirAll(pendingDir(cfg.Root), 0o755); err != nil {
+		return false
+	}
+	// Written directly rather than atomically: a torn snapshot fails to parse
+	// and the verification is skipped, which is the same outcome as not having
+	// armed it. Nothing downstream trusts a partial read.
+	return os.WriteFile(pendingFile(cfg.Root, sessionID), enc, 0o644) == nil
+}
+
+// verifyAfter compares the tree against the snapshot armed before an opaque
+// command, and reports anything that landed outside the agent's territory.
+//
+// This runs after the write. It cannot prevent it, so the value is entirely in
+// telling the agent precisely what to undo, which agents are good at.
+func verifyAfter(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.Event) {
+	if team == "" || ev.SessionID == "" {
+		return
+	}
+	file := pendingFile(cfg.Root, ev.SessionID)
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		return // nothing was armed, which is the common case
+	}
+	// One snapshot answers one command. Removing it first means a failure below
+	// cannot leave it to be compared against some unrelated later command.
+	os.Remove(file)
+
+	var before gitstate.Snapshot
+	if err := json.Unmarshal(raw, &before); err != nil {
+		return
+	}
+	after, err := gitstate.Take(cfg.Root)
+	if err != nil {
+		return
+	}
+
+	var escaped []string
+	for _, path := range gitstate.Changed(&before, after) {
+		// Our own runtime state changes constantly and is nobody's territory.
+		if strings.HasPrefix(path, ".agentcoord/") {
+			continue
+		}
+		decision, pattern, err := cfg.Map.Check(team, filepath.Join(cfg.Root, path))
+		if err != nil || decision != territory.Denied {
+			continue
+		}
+		escaped = append(escaped, path)
+		record(cfg, journal.Entry{
+			Kind: journal.EscapedGuard, Agent: string(agent), Team: team,
+			SessionID: ev.SessionID, Path: path,
+			Detail: fmt.Sprintf("written by a command whose target could not be "+
+				"read in advance; belongs to %q, matched %q",
+				cfg.Map.Owner(filepath.Join(cfg.Root, path)), pattern),
+		})
+	}
+	if len(escaped) == 0 {
+		return
+	}
+
+	// Granted before the agent is told, so the revert it is about to attempt is
+	// not blocked by the very rule that flagged it.
+	grantRemedy(cfg, ev.SessionID, escaped)
+
+	// PostToolUse can put text in front of the model on both agents, which is
+	// the only thing that turns this into a correction rather than a log line.
+	emitPostContext(fmt.Sprintf(
+		"agentcoord: that command wrote %s, which the %s team does not own. "+
+			"You have been granted permission to revert exactly those paths for "+
+			"the next %s, so delete or restore them now and then stay inside your "+
+			"own territory.",
+		strings.Join(escaped, ", "), team, remedy.TTL))
+	fmt.Fprintf(os.Stderr,
+		"agentcoord: %s wrote outside %q: %s\n",
+		agent, team, strings.Join(escaped, ", "))
+}
+
+// emitPostContext injects text at PostToolUse. The event name has to match the
+// event that is firing or the agent ignores the payload.
+func emitPostContext(text string) {
+	out := map[string]any{
+		"hookSpecificOutput": map[string]any{
+			"hookEventName":     "PostToolUse",
+			"additionalContext": text,
+		},
+	}
+	if enc, err := json.Marshal(out); err == nil {
+		fmt.Println(string(enc))
+	}
+}
+
+// record writes a journal entry. Failing to record that something happened is
+// never a reason to change what happened, so the error is dropped.
+func record(cfg *config.Config, e journal.Entry) {
+	store, err := journal.Open(cfg.Root)
+	if err != nil {
+		return
+	}
+	store.Append(e)
+}
+
+// runDoctor diagnoses the ways this tool can be installed and silently not work.
+//
+// That is the failure mode worth building a command for: Codex skips project
+// hooks in an untrusted repo without saying anything, so a half-installed setup
+// looks exactly like a working one until two agents collide.
+func runDoctor() int {
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot determine working directory: %v\n", err)
+		return 1
+	}
+
+	problems := 0
+	report := func(ok bool, subject, detail string) {
+		mark := "ok  "
+		if !ok {
+			mark = "FAIL"
+			problems++
+		}
+		fmt.Printf("%s  %-28s %s\n", mark, subject, detail)
+	}
+
+	cfg, err := config.Load(cwd)
+	if errors.Is(err, config.ErrNotFound) {
+		report(false, "config", "no "+config.FileName+" here or above. Run: agentcoord init")
+		return 1
+	}
+	if err != nil {
+		report(false, "config", err.Error())
+		return 1
+	}
+	report(true, "config", fmt.Sprintf("%d teams, root %s", len(cfg.Map.Teams), cfg.Root))
+
+	// A team nobody joins enforces nothing.
+	claimed := 0
+	for _, t := range cfg.Map.Teams {
+		if len(cfg.AgentsFor(t.Name)) > 0 {
+			claimed++
+		}
+	}
+	report(claimed > 0, "team assignment",
+		fmt.Sprintf("%d of %d teams have a default agent", claimed, len(cfg.Map.Teams)))
+
+	for _, target := range install.Plan(cwd) {
+		wired, err := install.Installed(target)
+		switch {
+		case err != nil:
+			report(false, target.Agent+" hooks", err.Error())
+		case len(wired) == 0:
+			report(false, target.Agent+" hooks",
+				"not wired up. Run: agentcoord init")
+		case len(wired) < len(target.Events):
+			report(false, target.Agent+" hooks",
+				fmt.Sprintf("only %s wired, expected %d events",
+					strings.Join(wired, ", "), len(target.Events)))
+		default:
+			report(true, target.Agent+" hooks",
+				fmt.Sprintf("%d events in %s", len(wired), rel(cwd, target.File)))
+		}
+	}
+
+	// The silent one.
+	trusted, detail := codexTrusts(cwd)
+	report(trusted, "codex repo trust", detail)
+
+	if gitstate.Available(cwd) {
+		report(true, "after-the-fact checks", "git available, opaque writes are verified")
+	} else {
+		report(false, "after-the-fact checks",
+			"not a git repo, so writes from opaque shell commands cannot be checked")
+	}
+
+	if _, err := lease.Open(cfg.Root); err != nil {
+		report(false, "leases", err.Error())
+	} else {
+		report(true, "leases", "available")
+	}
+
+	fmt.Println()
+	if problems == 0 {
+		fmt.Println("Everything is wired up.")
+		return 0
+	}
+	fmt.Printf("%d problem(s). Anything marked FAIL means part of this is not enforcing.\n",
+		problems)
+	return 1
+}
+
+// codexTrusts reports whether Codex will load this repo's project hooks. Codex
+// skips them silently for an untrusted project, so this is checked by reading
+// its config rather than by waiting to find out.
+func codexTrusts(root string) (bool, string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false, "cannot find your home directory to check ~/.codex/config.toml"
+	}
+	file := filepath.Join(home, ".codex", "config.toml")
+	raw, err := os.ReadFile(file)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, "no ~/.codex/config.toml, so Codex is either not installed or not configured"
+	}
+	if err != nil {
+		return false, err.Error()
+	}
+	// Deliberately a substring check and not a TOML parse. Being wrong here
+	// costs a misleading line in a diagnostic; pulling in a TOML parser to be
+	// certain costs a dependency in a binary that has none.
+	if strings.Contains(string(raw), `"`+root+`"`) {
+		return true, "this repo is trusted, Codex will load its hooks"
+	}
+	return false, "this repo is NOT trusted, so Codex silently skips its hooks. " +
+		"Add [projects.\"" + root + "\"] trust_level = \"trusted\" to ~/.codex/config.toml"
+}
+
+// allowedToRemedy reports whether this session was told to undo a change at this
+// path and is still inside the window to do it.
+func allowedToRemedy(cfg *config.Config, sessionID, path string) bool {
+	if sessionID == "" {
+		return false
+	}
+	store, err := remedy.Open(cfg.Root)
+	if err != nil {
+		return false
+	}
+	return store.Allowed(sessionID, path)
+}
+
+// grantRemedy permits a session to write back over paths it wrote by mistake.
+func grantRemedy(cfg *config.Config, sessionID string, paths []string) {
+	if sessionID == "" || len(paths) == 0 {
+		return
+	}
+	store, err := remedy.Open(cfg.Root)
+	if err != nil {
+		return
+	}
+	store.Grant(sessionID, paths)
+}
+
+func clearRemedy(cfg *config.Config, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	store, err := remedy.Open(cfg.Root)
+	if err != nil {
+		return
+	}
+	store.Clear(sessionID)
 }

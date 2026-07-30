@@ -1,6 +1,6 @@
 //go:build unix
 
-package lease
+package lockfile
 
 import (
 	"fmt"
@@ -8,7 +8,7 @@ import (
 	"syscall"
 )
 
-// lockFile takes an exclusive advisory lock, blocking until it is available, and
+// Acquire takes an exclusive advisory lock, blocking until it is available, and
 // returns the unlock function.
 //
 // This is flock and not a lock file, and the difference is the whole reason it
@@ -17,9 +17,9 @@ import (
 // the kernel on behalf of an open descriptor: when the process dies, for any
 // reason, the lock is released. There is nothing to go stale.
 //
-// It is held for microseconds, only around the read-decide-write section of
-// Acquire, and never across an agent's tool call.
-func lockFile(path string) (unlock func(), err error) {
+// Callers hold it for microseconds, around a read-decide-write section, and
+// never across an agent's tool call.
+func Acquire(path string) (unlock func(), err error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("open lock %s: %w", path, err)

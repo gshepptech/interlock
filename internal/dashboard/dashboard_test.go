@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"agentcoord/internal/config"
+	"agentcoord/internal/journal"
 	"agentcoord/internal/lease"
 	"agentcoord/internal/session"
 )
@@ -48,7 +49,7 @@ func TestBuildCountsActiveSessionsAndHeldFilesPerTeam(t *testing.T) {
 			SessionID: "s1", Acquired: now.Add(-90 * time.Second)},
 	}
 
-	v := Build(cfg, sessions, leases, now)
+	v := Build(cfg, sessions, leases, nil, now)
 
 	byName := map[string]TeamView{}
 	for _, tv := range v.Teams {
@@ -81,7 +82,7 @@ func TestQuietSessionIsMarkedIdle(t *testing.T) {
 		{ID: "busy", Agent: "claude", Team: "backend", Started: now, LastSeen: now},
 		{ID: "quiet", Agent: "codex", Team: "frontend", Started: now,
 			LastSeen: now.Add(-5 * time.Minute)},
-	}, nil, now)
+	}, nil, nil, now)
 
 	byID := map[string]SessionView{}
 	for _, s := range v.Sessions {
@@ -98,7 +99,7 @@ func TestQuietSessionIsMarkedIdle(t *testing.T) {
 // An empty repo must say why nothing is showing, not just look broken.
 func TestNoSessionsProducesAnExplanation(t *testing.T) {
 	cfg := loadConfig(t, sample)
-	v := Build(cfg, nil, nil, time.Now())
+	v := Build(cfg, nil, nil, nil, time.Now())
 
 	if v.Warning == "" {
 		t.Error("no warning when nothing has run; an empty page reads as broken")
@@ -121,6 +122,11 @@ func TestHandlerRendersTheState(t *testing.T) {
 			Path: "src/types/api.ts", Team: "backend", Agent: "claude",
 			SessionID: "abcdef123456", Acquired: now.Add(-time.Minute),
 		}},
+		[]journal.Entry{{
+			At: now.Add(-30 * time.Second), Kind: journal.BlockedTerritory,
+			Agent: "codex", Team: "frontend", Path: "src/api/orders.go",
+			Detail: `belongs to "backend"`,
+		}},
 		now)
 
 	rec := httptest.NewRecorder()
@@ -141,7 +147,8 @@ func TestHandlerRendersTheState(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		"claude", "backend", "opus", "src/api/users.go", "src/types/api.ts",
-		"abcdef12", "src/components/**", "codex",
+		"abcdef12", "src/components/**", "codex", "src/api/orders.go",
+		"blocked, wrong territory", "1 collision",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page is missing %q", want)
@@ -170,6 +177,8 @@ func TestRenderedStateIsEscaped(t *testing.T) {
 		}},
 		[]*lease.Lease{{Path: nasty, Team: "backend", Agent: nasty,
 			SessionID: "s1", Acquired: now}},
+		[]journal.Entry{{At: now, Kind: journal.BlockedTerritory, Path: nasty,
+			Agent: nasty, Team: "backend", Detail: nasty}},
 		now)
 
 	rec := httptest.NewRecorder()
@@ -219,5 +228,60 @@ func TestSinceIsReadable(t *testing.T) {
 		if got := since(now, tc.then); got != tc.want {
 			t.Errorf("since(%v) = %q, want %q", tc.then, got, tc.want)
 		}
+	}
+}
+
+// The tool is invisible when it works, so the page has to say what it prevented.
+// A miss must be counted apart from a save, or the page flatters itself.
+func TestPreventedAndEscapedAreCountedSeparately(t *testing.T) {
+	now := time.Now()
+	cfg := loadConfig(t, sample)
+
+	v := Build(cfg, nil, nil, []journal.Entry{
+		{At: now, Kind: journal.BlockedTerritory, Path: "a.go", Team: "backend"},
+		{At: now, Kind: journal.BlockedLease, Path: "b.ts", Team: "frontend"},
+		{At: now, Kind: journal.EscapedGuard, Path: "c.go", Team: "backend"},
+	}, now)
+
+	if v.Prevented != 2 {
+		t.Errorf("Prevented = %d, want 2", v.Prevented)
+	}
+	if v.Escaped != 1 {
+		t.Errorf("Escaped = %d, want 1", v.Escaped)
+	}
+	if len(v.Events) != 3 {
+		t.Fatalf("got %d events, want 3", len(v.Events))
+	}
+	for _, e := range v.Events {
+		if e.Label == "" {
+			t.Errorf("event %+v has no label, so it renders as nothing", e)
+		}
+	}
+	if !v.Events[2].Escaped {
+		t.Error("the escaped write is not marked, so it reads as a success")
+	}
+	if v.Events[0].Escaped {
+		t.Error("a block is marked as escaped")
+	}
+}
+
+// An empty feed is ambiguous: nothing collided, or nothing is wired up. The page
+// has to say so rather than imply success.
+func TestEmptyFeedExplainsTheAmbiguity(t *testing.T) {
+	now := time.Now()
+	cfg := loadConfig(t, sample)
+
+	view := Build(cfg,
+		[]*session.Session{{ID: "s1", Agent: "claude", Team: "backend",
+			Started: now, LastSeen: now}},
+		nil, nil, now)
+
+	rec := httptest.NewRecorder()
+	Handler(func() (View, error) { return view, nil }).
+		ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "doctor") {
+		t.Error("an empty feed does not point at doctor, so a broken install looks like a quiet one")
 	}
 }

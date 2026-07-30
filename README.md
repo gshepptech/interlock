@@ -48,8 +48,22 @@ redirect ("someone else has this, go and do something else") and never a queue.
 tool would be sidestepped by `sed -i`, so shell commands are scanned for the
 paths they are likely to write.
 
+**After-the-fact verification** covers the case the guard cannot decide in
+advance. `python3 build.py` writes somewhere and nothing before it runs says
+where, so the tree is snapshotted either side of the command and anything that
+landed outside the agent's territory is reported back to it. That report also
+grants the agent permission to revert exactly those paths, for fifteen minutes,
+because a tool that demands a fix and then blocks the fix is worse than one that
+says nothing.
+
 **The dashboard** is how a person sees all of it at once: who is here, what each
-agent last touched, and which shared files are held. It binds to loopback only,
+agent last touched, which shared files are held, and what the tool has actually prevented. That
+part matters more than it sounds: a coordination tool is invisible when it works,
+and without a count of what it stopped there is no way to tell whether it is
+earning its place. Misses are counted separately from saves, so the page cannot
+flatter itself.
+
+The page binds to loopback only,
 has no flag to change that, and refuses a non-loopback address. It ships no
 JavaScript and fetches nothing, because it renders paths and model names that came
 out of another tool's session files.
@@ -144,7 +158,7 @@ and reasoned about it. That is awareness, not an error message.
   is one static binary with nothing to resolve at startup. That is also why this
   is Go and not Node: process start is on the hot path.
 
-## Two bugs worth recording
+## Three bugs worth recording
 
 **The pid trap.** Leases first reclaimed any lease whose recorded process had
 exited, to recover quickly from a crash. A cross-process test found that this
@@ -153,6 +167,13 @@ milliseconds after acquiring, so its pid is always dead. Three of twelve racing
 processes were each granted the same file. Liveness is now the time to live
 alone, and `Lease.PID` is informational only. The in-process race test passed
 throughout, which is why `crossprocess_test.go` exists.
+
+**The guard that blocked its own fix.** After-the-fact verification told an agent
+it had written outside its territory and to revert it. The agent tried to delete
+the file and territory blocked that too, because the file still was not its to
+touch. Found by running it, not by a test: the tool demanded a fix and then
+prevented it. A flagged path is now writable by the session that was told to fix
+it, for that path only and for fifteen minutes.
 
 **flock, not a lock file.** A lock file is state that outlives the process that
 made it, so a crash leaves a stale lock and the next run deadlocks. An flock is
@@ -165,11 +186,9 @@ read-decide-write section of `Acquire`, never across an agent's tool call.
 Stated plainly, because a coordination tool that implies coverage it does not
 have is worse than none.
 
-- **Opaque shell writes are reported, not blocked.** When a command writes
-  somewhere that cannot be read off the command line, a variable, a subshell,
-  `xargs`, or an interpreter like `python3`, the hook says so on stderr and allows
-  it. Blocking every such command would stop normal work. This is the one hole
-  left.
+- **Opaque shell writes are caught after the fact, not before.** A command whose
+  target cannot be read off the command line is allowed, then checked. Outside a
+  git repo it cannot even be checked, and `agentcoord doctor` says so.
 - **Claude Code and Codex only.** Cursor and Gemini CLI both have hooks and
   should slot into `hookio` without touching anything else.
 - **Unix only.** Leases need an advisory lock the kernel releases on process
@@ -192,6 +211,10 @@ internal/territory/   path globs to team ownership
 internal/lease/       one holder at a time on shared files
 internal/shellscan/   paths a shell command is likely to write
 internal/session/     who is here and what they last touched
+internal/journal/     what the tool actually prevented, capped
+internal/gitstate/    what a command changed, for after-the-fact checks
+internal/remedy/      narrow permission to undo a flagged write
+internal/lockfile/    the one advisory lock, released by the kernel on death
 internal/dashboard/   the live view, server-rendered
 internal/install/     merging hooks into each agent's own settings
 internal/config/      per-repo .agentcoord.json
@@ -200,3 +223,23 @@ internal/config/      per-repo .agentcoord.json
 `internal/hookio/testdata` holds payloads captured from real Claude Code and
 Codex sessions. If a vendor changes its envelope, those tests are how we find
 out.
+
+## The failure this tool is most likely to have
+
+Installed but not enforcing, with nothing to tell you. Codex skips project hooks
+in a repo it does not trust and says nothing about it, so half a setup looks
+exactly like a working one until two agents collide.
+
+`agentcoord doctor` exists for that:
+
+```
+ok    config                  2 teams, root /your/repo
+ok    claude hooks            4 events in .claude/settings.json
+ok    codex hooks             3 events in .codex/hooks.json
+FAIL  codex repo trust        this repo is NOT trusted, so Codex silently
+                              skips its hooks
+ok    after-the-fact checks   git available, opaque writes are verified
+ok    leases                  available
+```
+
+Run it after `init`, and any time the dashboard looks quieter than it should.
