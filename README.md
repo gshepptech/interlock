@@ -175,8 +175,13 @@ have is worse than none.
 - **Unix only.** Leases need an advisory lock the kernel releases on process
   death. Windows would need `LockFileEx`; the build fails loudly rather than
   degrading into a racing no-op.
-- **`init` does not edit agent settings.** It prints what to add. Merging into
-  files the user owns is not something to do behind their back.
+- **`init` cannot trust the repo for Codex.** That means editing
+  `~/.codex/config.toml`, a global file, and TOML without a parser is how you
+  corrupt someone's setup. It prints the two lines to add instead. Until they are
+  added, Codex skips its hooks silently and only Claude Code is coordinated.
+- **No test drives the two agents against each other.** Every cross-vendor claim
+  in this README was checked by hand. That is fine for three runs and not fine
+  for a product.
 
 ## Layout
 
