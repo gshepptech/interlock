@@ -315,5 +315,5 @@ vendor changes its envelope, those tests are how we find out.
 ---
 
 <div align="center">
-<sub>© Greg Sheppard. All rights reserved.</sub>
+<sub>All rights reserved.</sub>
 </div>
