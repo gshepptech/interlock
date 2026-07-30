@@ -156,20 +156,127 @@ func cli(t *testing.T, dir string, args ...string) result {
 	return res
 }
 
-// A repo with no declaration must behave exactly as if this tool were absent.
-// Anything else means installing it globally would change unrelated projects.
-func TestUnconfiguredRepoIsUntouched(t *testing.T) {
+// bare is a repo with no declaration at all. This is the ordinary case: the tool
+// is meant to work without being configured.
+func bare(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	for _, sub := range []string{"src/api", "src/components"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	if _, err := exec.LookPath("git"); err == nil {
+		cmd := exec.Command("git", "init", "-q")
+		cmd.Dir = dir
+		cmd.Run()
+	}
+	return dir
+}
+
+// Working alone in a repo nobody configured must be completely quiet. If the
+// tool chatters when there is no conflict, it is noise on every tool call.
+func TestUnconfiguredRepoIsSilentWhenNobodyElseIsThere(t *testing.T) {
+	dir := bare(t)
 
 	res := hook(t, dir, "PreToolUse", "claude",
-		write("s1", filepath.Join(dir, "anything.go")))
+		write("s1", filepath.Join(dir, "src/api/users.go")))
 
 	if res.exit != exitOK {
-		t.Errorf("exit = %d, want 0 in a repo with no config", res.exit)
+		t.Errorf("exit = %d, want 0 working alone", res.exit)
 	}
 	if res.stderr != "" || res.stdout != "" {
-		t.Errorf("said something in an unconfigured repo: out=%q err=%q",
+		t.Errorf("said something with no conflict: out=%q err=%q",
 			res.stdout, res.stderr)
+	}
+}
+
+// The whole point of the redesign: two agents coordinate with no configuration.
+func TestTwoAgentsCoordinateWithNoConfigAtAll(t *testing.T) {
+	dir := bare(t)
+	contested := filepath.Join(dir, "src/api/users.go")
+
+	first := hook(t, dir, "PreToolUse", "claude", write("claude-session", contested))
+	if first.blocked() {
+		t.Fatalf("the first agent into a free file was blocked: %s", first.stderr)
+	}
+
+	second := hook(t, dir, "PreToolUse", "codex", write("codex-session", contested))
+	if !second.blocked() {
+		t.Fatalf("exit = %d, want the second agent blocked from a file being worked on",
+			second.exit)
+	}
+	// The message has to say it is about timing, or an agent reads it as a
+	// permission problem and looks for another way in.
+	for _, want := range []string{"src/api/users.go", "another agent", "timing"} {
+		if !strings.Contains(second.stderr, want) {
+			t.Errorf("block message missing %q: %s", want, second.stderr)
+		}
+	}
+}
+
+// Coordination must not mean queueing. Agents working in different places should
+// never see each other's blocks.
+func TestDifferentFilesDoNotContend(t *testing.T) {
+	dir := bare(t)
+
+	a := hook(t, dir, "PreToolUse", "claude",
+		write("s1", filepath.Join(dir, "src/api/users.go")))
+	b := hook(t, dir, "PreToolUse", "codex",
+		write("s2", filepath.Join(dir, "src/components/Card.tsx")))
+
+	if a.blocked() || b.blocked() {
+		t.Errorf("two agents in different files contended: a=%q b=%q", a.stderr, b.stderr)
+	}
+}
+
+// An agent that knows where its peer is will usually stay out of the way without
+// ever being refused. This is the half that needs no rules.
+func TestSessionStartTellsAnAgentWhoElseIsWorking(t *testing.T) {
+	dir := bare(t)
+
+	// Codex arrives first and works in src/components.
+	hook(t, dir, "PreToolUse", "codex",
+		write("codex-session", filepath.Join(dir, "src/components/Card.tsx")))
+	hook(t, dir, "PostToolUse", "codex",
+		write("codex-session", filepath.Join(dir, "src/components/Card.tsx")))
+
+	res := hook(t, dir, "SessionStart", "claude",
+		map[string]any{"session_id": "claude-session"})
+
+	var out struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(res.stdout), &out); err != nil {
+		t.Fatalf("no injection envelope: %v\n%s", err, res.stdout)
+	}
+	context := out.HookSpecificOutput.AdditionalContext
+	for _, want := range []string{"codex", "src/components"} {
+		if !strings.Contains(context, want) {
+			t.Errorf("the arriving agent is not told about %q:\n%s", want, context)
+		}
+	}
+}
+
+// A session must never be told it is contending with itself.
+func TestASessionIsNotWarnedAboutItself(t *testing.T) {
+	dir := bare(t)
+
+	hook(t, dir, "PreToolUse", "claude",
+		write("only-session", filepath.Join(dir, "src/api/users.go")))
+	hook(t, dir, "PostToolUse", "claude",
+		write("only-session", filepath.Join(dir, "src/api/users.go")))
+
+	res := hook(t, dir, "SessionStart", "claude",
+		map[string]any{"session_id": "only-session"})
+
+	if strings.Contains(res.stdout, "Other agents are working") {
+		t.Errorf("a lone session was told it has company:\n%s", res.stdout)
 	}
 }
 

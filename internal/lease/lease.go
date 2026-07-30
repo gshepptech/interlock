@@ -27,12 +27,21 @@ import (
 	"agentcoord/internal/lockfile"
 )
 
-// DefaultTTL is how long a lease survives without being renewed. It has to
-// outlast the gap between one tool call and the next within a single turn, and
-// it has to be short enough that a crashed agent does not hold a contract file
-// hostage for the rest of the session. Renewal on every touch means an actively
-// worked file stays held indefinitely.
+// DefaultTTL is how long a declared shared file is held without being renewed.
+// It has to outlast the gap between one tool call and the next within a single
+// turn, and be short enough that a crashed agent does not hold a contract file
+// hostage. Renewal on every touch means an actively worked file stays held.
 const DefaultTTL = 3 * time.Minute
+
+// ImplicitTTL is how long an ordinary file is held just because someone wrote to
+// it. It is much shorter than DefaultTTL on purpose.
+//
+// With no configuration every write takes a claim, so an agent that touches
+// thirty files in a turn would lock its peer out of all thirty. A claim only
+// means "I am in here right now", so it should lapse about as fast as attention
+// does. Ninety seconds is long enough to cover the gap between two tool calls in
+// one turn and short enough that a file someone has moved on from frees quickly.
+const ImplicitTTL = 90 * time.Second
 
 // Lease records who holds a path.
 type Lease struct {
@@ -46,6 +55,14 @@ type Lease struct {
 	PID      int       `json:"pid"`
 	Acquired time.Time `json:"acquired"`
 	Renewed  time.Time `json:"renewed"`
+	// Hold is how long this particular claim survives without renewal. Stored
+	// on the lease rather than taken from the store, because an implicit claim
+	// and a declared one have different lifetimes and a reader has to honour
+	// whichever the writer meant.
+	Hold time.Duration `json:"hold,omitempty"`
+	// Implicit marks a claim taken simply because the file was written, rather
+	// than one covering a file declared shared. Only the display cares.
+	Implicit bool `json:"implicit,omitempty"`
 }
 
 // Holder identifies the session asking for a lease. SessionID is the identity
@@ -89,6 +106,13 @@ func open(root string, ttl time.Duration, now func() time.Time) (*Store, error) 
 // the same session renews rather than refusing, because an agent editing a file
 // across several tool calls in one turn is the normal case, not contention.
 func (s *Store) Acquire(path string, h Holder) (granted bool, current *Lease, err error) {
+	return s.AcquireFor(path, h, s.ttl, false)
+}
+
+// AcquireFor claims path with an explicit hold time. An implicit claim is one
+// taken because a file was written rather than because it was declared shared.
+func (s *Store) AcquireFor(path string, h Holder, hold time.Duration, implicit bool) (
+	granted bool, current *Lease, err error) {
 	unlock, err := lockfile.Acquire(filepath.Join(s.dir, ".lock"))
 	if err != nil {
 		return false, nil, err
@@ -108,6 +132,11 @@ func (s *Store) Acquire(path string, h Holder) (granted bool, current *Lease, er
 		existing = nil
 	case existing.SessionID == h.SessionID:
 		existing.Renewed = s.now()
+		// A file that starts as an implicit claim and turns out to be declared
+		// shared should take the longer hold, not keep the shorter one.
+		if hold > existing.Hold {
+			existing.Hold, existing.Implicit = hold, implicit
+		}
 		if err := s.write(file, existing); err != nil {
 			return false, nil, err
 		}
@@ -126,6 +155,8 @@ func (s *Store) Acquire(path string, h Holder) (granted bool, current *Lease, er
 		PID:       h.PID,
 		Acquired:  s.now(),
 		Renewed:   s.now(),
+		Hold:      hold,
+		Implicit:  implicit,
 	}
 	if err := s.write(file, fresh); err != nil {
 		return false, nil, err
@@ -207,7 +238,12 @@ func (s *Store) live(l *Lease) bool {
 	if l == nil {
 		return false
 	}
-	return s.now().Sub(l.Renewed) <= s.ttl
+	hold := l.Hold
+	if hold <= 0 {
+		// Written before claims carried their own hold time.
+		hold = s.ttl
+	}
+	return s.now().Sub(l.Renewed) <= hold
 }
 
 // pathFor hashes the repo-relative path into a filename. Paths contain
@@ -265,9 +301,17 @@ func readLease(file string) (*Lease, error) {
 // the refusal.
 func (l *Lease) Describe(now time.Time) string {
 	held := now.Sub(l.Acquired).Round(time.Second)
-	return fmt.Sprintf(
-		"%s is currently held by the %q team (%s, session %s), for the last %s",
-		l.Path, l.Team, l.Agent, shortID(l.SessionID), held)
+	who := l.Agent
+	if who == "" {
+		who = "another agent"
+	}
+	// Teams only exist when someone declared them, which is the exception. The
+	// common case has no team, and saying `the "" team` reads like a bug.
+	if l.Team != "" {
+		who += " on the " + l.Team + " team"
+	}
+	return fmt.Sprintf("%s, held by %s (session %s) for the last %s",
+		l.Path, who, shortID(l.SessionID), held)
 }
 
 func shortID(id string) string {

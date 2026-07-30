@@ -4,10 +4,12 @@ Lets coding agents from different vendors work the same repo at the same time
 without overwriting each other.
 
 You start Claude Code in one terminal and Codex in another, yourself, in one
-shared checkout. Each one is told what it owns and who else is here. If either
-tries to write outside its territory, or onto a shared file another agent is
-holding, the write is blocked and the agent is told why, so it redirects instead
-of failing.
+shared checkout. They see each other. Whoever writes a file first has it for a
+minute or two, and the other is told who is in there so it works on something
+else and comes back.
+
+**There is nothing to configure.** Run `agentcoord init` once and open your
+agents.
 
 No orchestrator. Neither agent is launched or owned by this tool. No worktrees.
 
@@ -32,13 +34,19 @@ that instruction, enforced.
 Hooks, not MCP. An MCP tool only runs if the model decides to call it; a hook
 runs whether the model cooperates or not.
 
-**Territory** is the cheap layer. Most collisions are not subtle races over one
-file, they are two teams in a directory they were never meant to share.
-Declaring who owns what removes those with no runtime state and no locking.
+**Awareness** is the half that needs no rules at all, and it does most of the
+work. Each agent is told, as it starts and as it goes, who else is live in the
+repo and which directories they are working in. An agent that knows where its
+peer is will usually stay out of the way without ever being refused anything.
 
-**Leases** cover what is left: the few files both teams legitimately need, like
-the type definitions or the API contract. One holder at a time, renewed on every
-touch, released on a tidy exit, expiring after three minutes otherwise.
+**Claims** are the backstop. Writing a file claims it for ninety seconds,
+renewed on every touch and released when the session ends. A second agent that
+tries the same file is refused and told who has it, in those words: a timing
+conflict, not a permission one, so work on something else and come back.
+
+**Territory** is optional, and only worth declaring for a rule the automatic
+behaviour cannot infer, such as one team owning `migrations/` outright. Most
+repos never need it. `agentcoord init --with-territory` writes a starter file.
 
 One property shapes the lease design: **an agent cannot wait.** There is no way
 to park a tool call and resume it when a lock frees, so a held file produces a
@@ -112,7 +120,18 @@ so its leases are freed by the time to live rather than on exit.
 
 All four run against real Claude Code and Codex sessions in one shared checkout.
 
-**Territory, both directions:**
+**Two agents, running at the same time, with no configuration at all.** Claude
+was told to make three separate edits to `src/shared.ts`. While it worked, Codex
+was told to add a comment to the same file. Codex reported:
+
+> The first write was blocked because `claude` held `src/shared.ts`. I waited,
+> re-read the file, saw another comment had been added, then applied the
+> requested comment without removing that change.
+
+All four edits survived. Neither agent lost the other's work, and neither was
+told anything by a human.
+
+**Territory, when it is declared, both directions:**
 
 | Agent | Team | Own territory | Other team's territory |
 | --- | --- | --- | --- |

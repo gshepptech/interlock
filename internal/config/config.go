@@ -7,7 +7,6 @@ package config
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,23 +39,36 @@ type TeamSpec struct {
 	Agents []string `json:"agents,omitempty"`
 }
 
-// Config is the loaded, validated declaration plus where it was found.
+// Config is the territory declaration, if there is one, plus the repo it applies
+// to.
+//
+// A repo with no declaration is the normal case and produces a usable Config
+// with no teams. Everything still works: agents see each other, and writing a
+// file claims it briefly so a second agent is told rather than colliding.
+// Declaring territory is how you add a rule the automatic behaviour cannot
+// infer, not how you switch the tool on.
 type Config struct {
 	Root string
 	Map  *territory.Map
-	file File
+	// Declared reports whether a declaration file was found. Without one the
+	// tool runs on observation alone.
+	Declared bool
+	file     File
 }
 
-// ErrNotFound means no declaration exists at or above the starting directory.
-// Callers must treat this as "not configured, do nothing" rather than an error
-// worth failing a tool call over.
-var ErrNotFound = errors.New("no " + FileName + " found")
-
-// Load walks up from start looking for the declaration.
+// Load finds the repo for start and any declaration in it.
+//
+// A missing declaration is not an error. It returns a Config with no teams and
+// Declared false, which is the shape the tool is designed around: the common
+// case is a repo nobody has configured.
 func Load(start string) (*Config, error) {
-	path, root, err := find(start)
-	if err != nil {
-		return nil, err
+	path, root, found := find(start)
+	if !found {
+		repoRoot, err := discoverRoot(start)
+		if err != nil {
+			return nil, err
+		}
+		return &Config{Root: repoRoot, Map: &territory.Map{Root: repoRoot}}, nil
 	}
 
 	raw, err := os.ReadFile(path)
@@ -69,7 +81,7 @@ func Load(start string) (*Config, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
-	cfg := &Config{Root: root, file: f, Map: &territory.Map{Root: root}}
+	cfg := &Config{Root: root, file: f, Declared: true, Map: &territory.Map{Root: root}}
 	// Map iteration order is random, and Check reports the first conflicting
 	// claim it meets. Sorting keeps that message stable between runs so a
 	// config bug does not look like an intermittent one.
@@ -108,6 +120,20 @@ func (c *Config) AgentsFor(team string) []string {
 // session start. It is prose because the consumer is a language model.
 func (c *Config) Summary(team string) string {
 	var b strings.Builder
+
+	if !c.Declared {
+		// Nothing was declared, so describe the behaviour rather than a map.
+		// The agent needs to know why a write might be refused, and that the
+		// refusal is about timing rather than permission.
+		b.WriteString("More than one AI coding agent may be working in this " +
+			"repository at the same time. Writing a file claims it for a couple " +
+			"of minutes; if another agent is already in a file you try to write, " +
+			"the write is refused and you are told who has it. That is a " +
+			"scheduling conflict, not a permission one: work on something else " +
+			"and come back to it, and do not try to route around it.")
+		return b.String()
+	}
+
 	if team != "" {
 		fmt.Fprintf(&b, "You are on the %q team. ", team)
 	}
@@ -124,21 +150,44 @@ func (c *Config) Summary(team string) string {
 	return b.String()
 }
 
-func find(start string) (configPath, root string, err error) {
+func find(start string) (configPath, root string, found bool) {
 	dir, err := filepath.Abs(start)
 	if err != nil {
-		return "", "", fmt.Errorf("resolve %s: %w", start, err)
+		return "", "", false
 	}
 	for {
 		candidate := filepath.Join(dir, FileName)
 		if _, err := os.Stat(candidate); err == nil {
-			return candidate, dir, nil
+			return candidate, dir, true
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return "", "", ErrNotFound
+			return "", "", false
 		}
 		dir = parent
+	}
+}
+
+// discoverRoot finds the repository when no declaration marks it.
+//
+// The git root is the right boundary: it is what a person means by "this
+// project", and it is the same boundary the after-the-fact checks already use.
+// Outside a repo the working directory is the only honest answer, which keeps
+// coordination scoped to wherever the agents were actually started.
+func discoverRoot(start string) (string, error) {
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", start, err)
+	}
+	for probe := dir; ; {
+		if info, err := os.Stat(filepath.Join(probe, ".git")); err == nil && info != nil {
+			return probe, nil
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return dir, nil
+		}
+		probe = parent
 	}
 }
 

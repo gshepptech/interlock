@@ -41,6 +41,7 @@ const usage = `agentcoord - keep coding agents out of each other's way
   agentcoord doctor                 check for the ways this silently fails
   agentcoord dashboard [--addr A]   serve a live view on 127.0.0.1 (default :7717)
   agentcoord init [--dry-run]       wire the hooks into each agent's settings
+  agentcoord init --with-territory  also write a territory file, if you want rules
   agentcoord init --uninstall       take them back out
 
 Events: SessionStart, PreToolUse, PostToolUse, SessionEnd, Stop
@@ -119,10 +120,6 @@ func runHook(args []string) int {
 	}
 
 	cfg, err := config.Load(cwd)
-	if errors.Is(err, config.ErrNotFound) {
-		// Not configured. Behave exactly as if this tool were not installed.
-		return exitOK
-	}
 	if err != nil {
 		return allow("could not load config: %v", err)
 	}
@@ -159,11 +156,6 @@ func runHook(args []string) int {
 // Every file is checked, not just the first: one Codex patch can touch several,
 // and stopping at the first allowed one would wave the rest through.
 func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.Event) int {
-	if team == "" {
-		// This session declared no team, so there is nothing to enforce against.
-		return exitOK
-	}
-
 	files := ev.Files
 	if len(files) == 0 && ev.Command != "" {
 		found := shellscan.Scan(ev.Command)
@@ -216,6 +208,11 @@ func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.
 			// for stopping the user; say it and move on.
 			return allow("%v", err)
 		}
+		// With no declaration every path is Unowned, which is the ordinary case
+		// and the one the claim below covers.
+		if team == "" && decision == territory.Denied {
+			decision = territory.Unowned
+		}
 
 		switch decision {
 		case territory.Denied:
@@ -241,29 +238,43 @@ func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.
 				rel(cfg.Root, file), owner, pattern, team)
 			return exitBlock
 
-		case territory.Shared:
+		default:
+			// Every other outcome, whether the file was declared shared or was
+			// never mentioned at all, is settled by claiming it. This is what
+			// makes the tool work with no configuration: writing a file means
+			// you are in it, and a second agent is told rather than colliding.
 			if store == nil {
 				continue
 			}
+			hold, implicit := lease.ImplicitTTL, true
+			if decision == territory.Shared {
+				// A file two teams were told to share is worth holding longer;
+				// contention on it is expected rather than incidental.
+				hold, implicit = lease.DefaultTTL, false
+			}
+
 			relPath := rel(cfg.Root, file)
-			granted, current, err := store.Acquire(relPath, holder)
+			granted, current, err := store.AcquireFor(relPath, holder, hold, implicit)
 			if err != nil {
-				return allow("could not take a lease on %s: %v", relPath, err)
+				return allow("could not claim %s: %v", relPath, err)
 			}
-			if !granted {
-				record(cfg, journal.Entry{
-					Kind: journal.BlockedLease, Agent: string(agent), Team: team,
-					SessionID: ev.SessionID, Path: relPath,
-					Detail: fmt.Sprintf("held by %q since %s ago", current.Team,
-						time.Since(current.Acquired).Round(time.Second)),
-				})
-				fmt.Fprintf(os.Stderr,
-					"Blocked by agentcoord: %s. It is a shared file, so only one "+
-						"agent may hold it at a time. Work on something else and come "+
-						"back to it, or ask the holder to finish.\n",
-					current.Describe(time.Now()))
-				return exitBlock
+			if granted {
+				continue
 			}
+
+			record(cfg, journal.Entry{
+				Kind: journal.BlockedLease, Agent: string(agent), Team: team,
+				SessionID: ev.SessionID, Path: relPath,
+				Detail: fmt.Sprintf("%s had it, %s ago", current.Agent,
+					time.Since(current.Acquired).Round(time.Second)),
+			})
+			fmt.Fprintf(os.Stderr,
+				"Blocked by agentcoord: %s is being worked on by another agent "+
+					"right now (%s). This is a timing conflict, not a permission "+
+					"one: work on something else and come back to it. Do not try "+
+					"to write it another way.\n",
+				relPath, current.Describe(time.Now()))
+			return exitBlock
 		}
 	}
 	return exitOK
@@ -272,7 +283,7 @@ func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.
 // renew extends the leases this session holds on the files it just touched, so a
 // file under active work never expires beneath its holder.
 func renew(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.Event) {
-	if team == "" || len(ev.Files) == 0 {
+	if len(ev.Files) == 0 {
 		return
 	}
 	store, err := lease.Open(cfg.Root)
@@ -285,12 +296,16 @@ func renew(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.Event
 	}
 	for _, file := range ev.Files {
 		decision, _, err := cfg.Map.Check(team, file)
-		if err != nil || decision != territory.Shared {
+		if err != nil {
 			continue
 		}
-		// Errors are ignored on purpose: a failed renewal costs the lease its
+		hold, implicit := lease.ImplicitTTL, true
+		if decision == territory.Shared {
+			hold, implicit = lease.DefaultTTL, false
+		}
+		// Errors are ignored on purpose: a failed renewal costs the claim its
 		// time to live, and there is nothing useful to tell the agent.
-		store.Acquire(rel(cfg.Root, file), holder)
+		store.AcquireFor(rel(cfg.Root, file), holder, hold, implicit)
 	}
 }
 
@@ -352,31 +367,114 @@ func endSession(cfg *config.Config, sessionID string) {
 	store.End(sessionID)
 }
 
-// presence describes the other agents currently holding shared files, for
-// injection at session start. Nothing is said when the repo is quiet, because a
-// line of boilerplate on every session start trains an agent to ignore it.
+// presence describes the other agents working this repo right now.
+//
+// This is the half of the tool that needs no rules and no configuration at all.
+// An agent that knows a peer is live in src/components and last touched Card.tsx
+// a minute ago will usually stay out of the way on its own, without ever being
+// refused anything. Blocking is the backstop; this is the mechanism.
+//
+// Nothing is said when the repo is quiet, because a line of boilerplate on every
+// session start trains an agent to skip the whole block.
 func presence(cfg *config.Config, ownSession string) string {
-	store, err := lease.Open(cfg.Root)
-	if err != nil {
-		return ""
-	}
-	active, err := store.Active()
-	if err != nil || len(active) == 0 {
+	sessions, leases := otherSessions(cfg, ownSession), heldBy(cfg, ownSession)
+	if len(sessions) == 0 && len(leases) == 0 {
 		return ""
 	}
 
 	var b strings.Builder
+	b.WriteString("\n\nOther agents are working in this repository right now.")
+
 	now := time.Now()
-	for _, l := range active {
-		if l.SessionID == ownSession {
+	for _, sess := range sessions {
+		fmt.Fprintf(&b, "\n  - %s", describeSession(sess, now))
+		if areas := workingAreas(sess); areas != "" {
+			fmt.Fprintf(&b, ", working in %s", areas)
+		}
+		if recent := sess.Recent; len(recent) > 0 {
+			fmt.Fprintf(&b, ". Last touched %s %s ago",
+				recent[0].Path, now.Sub(recent[0].At).Round(time.Second))
+		}
+	}
+	for _, l := range leases {
+		fmt.Fprintf(&b, "\n  - %s is claimed, so writing it will be refused until "+
+			"they move on", l.Path)
+	}
+	b.WriteString("\nStay out of what they are in the middle of. If you need a " +
+		"file they hold, do something else first and come back to it.")
+	return b.String()
+}
+
+func describeSession(s *session.Session, now time.Time) string {
+	who := s.Agent
+	if who == "" {
+		who = "an agent"
+	}
+	if s.Team != "" {
+		who += " on " + s.Team
+	}
+	return fmt.Sprintf("%s, active %s ago", who,
+		now.Sub(s.LastSeen).Round(time.Second))
+}
+
+// workingAreas names the directories a session has been writing in, which is a
+// better hint than a file list: it tells a peer which part of the repo to avoid
+// rather than which exact bytes are locked.
+func workingAreas(s *session.Session) string {
+	seen := map[string]bool{}
+	var dirs []string
+	for _, t := range s.Recent {
+		dir := filepath.Dir(t.Path)
+		if dir == "." || seen[dir] {
 			continue
 		}
-		fmt.Fprintf(&b, "\n  - %s", l.Describe(now))
+		seen[dir] = true
+		dirs = append(dirs, dir)
+		if len(dirs) == 3 {
+			break
+		}
 	}
-	if b.Len() == 0 {
-		return ""
+	return strings.Join(dirs, ", ")
+}
+
+func otherSessions(cfg *config.Config, ownSession string) []*session.Session {
+	store, err := session.Open(cfg.Root)
+	if err != nil {
+		return nil
 	}
-	return "\n\nShared files currently held by other agents:" + b.String()
+	active, err := store.Active()
+	if err != nil {
+		return nil
+	}
+	var out []*session.Session
+	for _, s := range active {
+		if s.ID != ownSession {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func heldBy(cfg *config.Config, ownSession string) []*lease.Lease {
+	store, err := lease.Open(cfg.Root)
+	if err != nil {
+		return nil
+	}
+	active, err := store.Active()
+	if err != nil {
+		return nil
+	}
+	var out []*lease.Lease
+	for _, l := range active {
+		// Implicit claims churn as agents move between files, and listing all of
+		// them would bury the session summary above. The directories a peer is
+		// working in are the useful signal; only a deliberately shared file is
+		// worth naming as a hard obstacle.
+		if l.SessionID != ownSession && !l.Implicit {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // emitContext returns text both agents inject into the model's context. The
@@ -429,17 +527,16 @@ func runStatus() int {
 		return 1
 	}
 	cfg, err := config.Load(cwd)
-	if errors.Is(err, config.ErrNotFound) {
-		fmt.Printf("No %s in this repo or any parent. Run: agentcoord init\n",
-			config.FileName)
-		return 0
-	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
 
 	fmt.Printf("repo: %s\n\n", cfg.Root)
+	if !cfg.Declared {
+		fmt.Printf("automatic: no %s, so agents claim files as they write them\n\n",
+			config.FileName)
+	}
 	for _, t := range cfg.Map.Teams {
 		fmt.Printf("%s\n", t.Name)
 		for _, p := range t.Owns {
@@ -514,13 +611,9 @@ func runDashboard(args []string) int {
 		fmt.Fprintf(os.Stderr, "cannot determine working directory: %v\n", err)
 		return 1
 	}
-	// Fail here rather than serving a page that explains it has no config.
+	// A repo with no declaration is the normal case, so the only thing worth
+	// failing on here is a declaration that exists and cannot be read.
 	if _, err := config.Load(cwd); err != nil {
-		if errors.Is(err, config.ErrNotFound) {
-			fmt.Printf("No %s in this repo or any parent. Run: agentcoord init\n",
-				config.FileName)
-			return 1
-		}
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
@@ -615,13 +708,15 @@ const starterConfig = `{
 // replacing, and reports exactly which files it changed. Nothing is silent:
 // these are files the user owns.
 func runInit(args []string) int {
-	var dryRun, uninstall bool
+	var dryRun, uninstall, withTerritory bool
 	for _, a := range args {
 		switch a {
 		case "--dry-run", "-dry-run", "-n":
 			dryRun = true
 		case "--uninstall", "-uninstall":
 			uninstall = true
+		case "--with-territory", "-with-territory":
+			withTerritory = true
 		default:
 			fmt.Fprintf(os.Stderr, "unknown flag %q\n", a)
 			return exitUsage
@@ -638,15 +733,22 @@ func runInit(args []string) int {
 		return uninstallHooks(cwd, dryRun)
 	}
 
-	if _, err := os.Stat(config.FileName); err == nil {
-		fmt.Printf("%s exists, leaving it alone\n", config.FileName)
-	} else if dryRun {
-		fmt.Printf("would write %s\n", config.FileName)
-	} else if err := os.WriteFile(config.FileName, []byte(starterConfig), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "write %s: %v\n", config.FileName, err)
-		return 1
-	} else {
-		fmt.Printf("wrote %s, edit it so the territories match this repo\n", config.FileName)
+	// No configuration is written. The tool works on observation alone, and a
+	// starter file would suggest it has to be filled in before anything happens.
+	if withTerritory {
+		switch _, err := os.Stat(config.FileName); {
+		case err == nil:
+			fmt.Printf("%s exists, leaving it alone\n", config.FileName)
+		case dryRun:
+			fmt.Printf("would write %s\n", config.FileName)
+		default:
+			if err := os.WriteFile(config.FileName, []byte(starterConfig), 0o644); err != nil {
+				fmt.Fprintf(os.Stderr, "write %s: %v\n", config.FileName, err)
+				return 1
+			}
+			fmt.Printf("wrote %s, edit it so the territories match this repo\n",
+				config.FileName)
+		}
 	}
 
 	exe, err := os.Executable()
@@ -690,14 +792,20 @@ func runInit(args []string) int {
 	}
 
 	fmt.Printf(`
-One step is left and it cannot be done for you. Codex loads project hooks only
-from a trusted project, and skips them silently otherwise. Add this to
-~/.codex/config.toml:
+That is it. Nothing to configure: open Claude in one terminal and Codex in
+another and they will see each other. Whoever writes a file first has it for a
+minute or two; the other is told who is in there and works on something else.
+
+One step cannot be done for you. Codex loads project hooks only from a trusted
+project and skips them silently otherwise, so add this to ~/.codex/config.toml:
 
   [projects.%q]
   trust_level = "trusted"
 
-Then: agentcoord status, and agentcoord dashboard to watch.
+Then run: agentcoord doctor, and agentcoord dashboard to watch them work.
+
+If you ever need a hard rule the automatic behaviour cannot work out, such as
+one team owning a directory outright, run: agentcoord init --with-territory
 `, cwd)
 	if failed {
 		return 1
@@ -881,25 +989,27 @@ func runDoctor() int {
 	}
 
 	cfg, err := config.Load(cwd)
-	if errors.Is(err, config.ErrNotFound) {
-		report(false, "config", "no "+config.FileName+" here or above. Run: agentcoord init")
-		return 1
-	}
 	if err != nil {
 		report(false, "config", err.Error())
 		return 1
 	}
-	report(true, "config", fmt.Sprintf("%d teams, root %s", len(cfg.Map.Teams), cfg.Root))
-
-	// A team nobody joins enforces nothing.
-	claimed := 0
-	for _, t := range cfg.Map.Teams {
-		if len(cfg.AgentsFor(t.Name)) > 0 {
-			claimed++
+	if cfg.Declared {
+		report(true, "territory", fmt.Sprintf("%d teams declared in %s",
+			len(cfg.Map.Teams), config.FileName))
+		// A team nobody joins enforces nothing.
+		claimed := 0
+		for _, t := range cfg.Map.Teams {
+			if len(cfg.AgentsFor(t.Name)) > 0 {
+				claimed++
+			}
 		}
+		report(claimed > 0, "team assignment",
+			fmt.Sprintf("%d of %d teams have a default agent", claimed, len(cfg.Map.Teams)))
+	} else {
+		// Not a problem. This is how the tool is meant to be used.
+		report(true, "territory", "automatic, agents claim files as they write them")
 	}
-	report(claimed > 0, "team assignment",
-		fmt.Sprintf("%d of %d teams have a default agent", claimed, len(cfg.Map.Teams)))
+	report(true, "repo", cfg.Root)
 
 	for _, target := range install.Plan(cwd) {
 		wired, err := install.Installed(target)

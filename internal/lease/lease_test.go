@@ -320,6 +320,28 @@ func TestDifferentPathsDoNotShareALease(t *testing.T) {
 	}
 }
 
+// The common case has no teams at all, and a message reading `the "" team`
+// reads like a bug to whoever sees it, agent or human.
+func TestDescribeReadsWellWithNoTeam(t *testing.T) {
+	now := time.Now()
+	s := store(t, DefaultTTL, &now)
+
+	_, l, err := s.Acquire("src/shared.ts", Holder{
+		Agent: "claude", SessionID: "abcdef123456", PID: os.Getpid(),
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	got := l.Describe(now.Add(30 * time.Second))
+	if strings.Contains(got, `""`) {
+		t.Errorf("Describe() = %q, contains an empty quoted team", got)
+	}
+	if !strings.Contains(got, "claude") || !strings.Contains(got, "src/shared.ts") {
+		t.Errorf("Describe() = %q, missing the holder or the path", got)
+	}
+}
+
 func TestDescribeNamesTheHolderAndHowLong(t *testing.T) {
 	now := time.Now()
 	s := store(t, DefaultTTL, &now)
