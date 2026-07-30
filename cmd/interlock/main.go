@@ -21,17 +21,17 @@ import (
 	"strings"
 	"time"
 
-	"interlock/internal/config"
-	"interlock/internal/dashboard"
-	"interlock/internal/gitstate"
-	"interlock/internal/hookio"
-	"interlock/internal/install"
-	"interlock/internal/journal"
-	"interlock/internal/lease"
-	"interlock/internal/remedy"
-	"interlock/internal/session"
-	"interlock/internal/shellscan"
-	"interlock/internal/territory"
+	"github.com/gshepptech/interlock/internal/config"
+	"github.com/gshepptech/interlock/internal/dashboard"
+	"github.com/gshepptech/interlock/internal/gitstate"
+	"github.com/gshepptech/interlock/internal/hookio"
+	"github.com/gshepptech/interlock/internal/install"
+	"github.com/gshepptech/interlock/internal/journal"
+	"github.com/gshepptech/interlock/internal/lease"
+	"github.com/gshepptech/interlock/internal/remedy"
+	"github.com/gshepptech/interlock/internal/session"
+	"github.com/gshepptech/interlock/internal/shellscan"
+	"github.com/gshepptech/interlock/internal/territory"
 )
 
 const usage = `interlock - keep coding agents out of each other's way

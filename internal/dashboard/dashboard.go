@@ -17,10 +17,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"interlock/internal/config"
-	"interlock/internal/journal"
-	"interlock/internal/lease"
-	"interlock/internal/session"
+	"github.com/gshepptech/interlock/internal/config"
+	"github.com/gshepptech/interlock/internal/journal"
+	"github.com/gshepptech/interlock/internal/lease"
+	"github.com/gshepptech/interlock/internal/session"
 )
 
 // View is everything the page shows, assembled before rendering so the template

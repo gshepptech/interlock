@@ -1,98 +1,155 @@
-# interlock
+<div align="center">
 
-Lets coding agents from different vendors work the same repo at the same time
-without overwriting each other.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/wordmark-dark.svg">
+  <img src="docs/wordmark-light.svg" alt="Interlock" width="380">
+</picture>
 
-You start Claude Code in one terminal and Codex in another, yourself, in one
-shared checkout. They see each other. Whoever writes a file first has it for a
-minute or two, and the other is told who is in there so it works on something
-else and comes back.
+### Run two AI coding agents in one repo without them overwriting each other
 
-**There is nothing to configure.** Run `interlock init` once and open your
-agents.
+Open Claude Code in one terminal. Open Codex in another. Give them both work.<br>
+They see each other. Nothing to configure.
 
-No orchestrator. Neither agent is launched or owned by this tool. No worktrees.
+<br>
 
-## Status
+![Go](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go&logoColor=white)
+![Dependencies](https://img.shields.io/badge/runtime_deps-0-1c7a4b?style=flat-square)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-14181b?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-138-1c7a4b?style=flat-square)
+![Status](https://img.shields.io/badge/status-pre--release-b57500?style=flat-square)
 
-Working and verified end to end against Claude Code and Codex on one machine.
-See [what is not built yet](#what-is-not-built-yet) before relying on it.
+</div>
 
-## Why this exists
+---
 
-Every other approach to two agents in one repo gives each agent its own git
-worktree, so they cannot collide because they cannot see each other's files.
-That works, and it means you are no longer working in one checkout.
+## The problem
 
-Claude Code's own agent teams share a checkout and have no file conflict
-enforcement at all. The documented answer is "break the work so each teammate
-owns a different set of files", which is an instruction to the human. This is
-that instruction, enforced.
+Two agents in one checkout will silently clobber each other. One writes a file,
+the other writes the same file, and the first edit is gone with nothing to say it
+ever happened.
+
+Every existing answer is **isolation**: give each agent its own git worktree so
+they cannot collide because they cannot see each other's files. That works, and
+it means you are no longer working in one checkout.
+
+Claude Code's own agent teams share a checkout and have **no file conflict
+enforcement at all**. The documented answer is:
+
+> Two teammates editing the same file leads to overwrites. Break the work so each
+> teammate owns a different set of files.
+
+That is an instruction to the human. Interlock is that instruction, enforced.
+
+---
+
+## What it looks like
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/panel-dark.png">
+  <img src="docs/panel-light.png" alt="The Interlock panel: two agents, five files held, two collisions stopped">
+</picture>
+
+A signalling panel, because an interlocking is one. Files are track sections that
+are occupied or clear. Every agent shows an aspect: **green** working, **amber**
+waiting, **red** blocked.
+
+---
+
+## Quick start
+
+```bash
+go install github.com/gshepptech/interlock/cmd/interlock@latest
+
+cd /your/repo
+interlock init        # wires the hooks. Writes no config.
+interlock doctor      # confirms it is actually enforcing
+interlock dashboard   # the panel, on 127.0.0.1:7717
+```
+
+Then open your agents and give them work. That is the whole setup.
+
+> [!IMPORTANT]
+> Codex loads project hooks only from a **trusted** project and skips them
+> silently otherwise, so half an install looks exactly like a working one.
+> `interlock doctor` checks for this by name. It is the one step that cannot be
+> done for you.
+
+---
 
 ## How it works
 
-Hooks, not MCP. An MCP tool only runs if the model decides to call it; a hook
-runs whether the model cooperates or not.
+Hooks, not MCP. An MCP tool only runs if the model decides to call it. A hook
+fires whether the model cooperates or not.
 
-**Awareness** is the half that needs no rules at all, and it does most of the
-work. Each agent is told, as it starts and as it goes, who else is live in the
-repo and which directories they are working in. An agent that knows where its
-peer is will usually stay out of the way without ever being refused anything.
+```mermaid
+sequenceDiagram
+    participant C as Claude Code
+    participant I as Interlock
+    participant X as Codex
 
-**Claims** are the backstop. Writing a file claims it for ninety seconds,
-renewed on every touch and released when the session ends. A second agent that
-tries the same file is refused and told who has it, in those words: a timing
-conflict, not a permission one, so work on something else and come back.
+    C->>I: about to write src/api/users.go
+    I-->>C: allowed, claimed for 90s
+    Note over C: works
 
-**Territory** is optional, and only worth declaring for a rule the automatic
-behaviour cannot infer, such as one team owning `migrations/` outright. Most
-repos never need it. `interlock init --with-territory` writes a starter file.
+    X->>I: about to write src/api/users.go
+    I-->>X: blocked, claude is in there right now
+    Note over X: reads the reason,<br/>works elsewhere, comes back
 
-One property shapes the lease design: **an agent cannot wait.** There is no way
-to park a tool call and resume it when a lock frees, so a held file produces a
-redirect ("someone else has this, go and do something else") and never a queue.
-
-**Shell scanning** closes the obvious bypass. Territory enforced only at the edit
-tool would be sidestepped by `sed -i`, so shell commands are scanned for the
-paths they are likely to write.
-
-**After-the-fact verification** covers the case the guard cannot decide in
-advance. `python3 build.py` writes somewhere and nothing before it runs says
-where, so the tree is snapshotted either side of the command and anything that
-landed outside the agent's territory is reported back to it. That report also
-grants the agent permission to revert exactly those paths, for fifteen minutes,
-because a tool that demands a fix and then blocks the fix is worse than one that
-says nothing.
-
-**The dashboard** is how a person sees all of it at once: who is here, what each
-agent last touched, which shared files are held, and what the tool has actually prevented. That
-part matters more than it sounds: a coordination tool is invisible when it works,
-and without a count of what it stopped there is no way to tell whether it is
-earning its place. Misses are counted separately from saves, so the page cannot
-flatter itself.
-
-The page binds to loopback only,
-has no flag to change that, and refuses a non-loopback address. It ships no
-JavaScript and fetches nothing, because it renders paths and model names that came
-out of another tool's session files.
-
-## Try it
-
-```bash
-go build -o bin/interlock ./cmd/interlock
-cd /your/repo
-/path/to/bin/interlock init --dry-run   # see exactly what would change
-/path/to/bin/interlock init             # wire the hooks into both agents
-/path/to/bin/interlock status           # territory, plus who holds what
-/path/to/bin/interlock dashboard        # live view on 127.0.0.1:7717
+    C->>I: session ends
+    I-->>I: claim released
 ```
 
-`init` merges into `.claude/settings.json` and `.codex/hooks.json` rather than
-replacing them, keeps a copy of anything it modifies, is safe to run twice, and
-refuses to touch settings it cannot parse. `init --uninstall` takes its hooks
-back out and leaves everything else alone.
+### Three layers, in the order they do work
 
-Territory is declared per repo in `.interlock.json`:
+| | | |
+|---|---|---|
+| **Awareness** | Needs no rules, does most of the work | Each agent is told who else is live and which directories they are working in. An agent that knows where its peer is usually stays out of the way without ever being refused anything. |
+| **Claims** | The backstop | Writing a file claims it for 90 seconds, renewed on every touch, released when the session ends. A second agent is refused and told who has it. |
+| **Verification** | For what cannot be judged in advance | `python3 build.py` writes somewhere and nothing before it runs says where. The tree is snapshotted either side of the command, and anything that landed out of bounds is reported back to the agent, which can then revert it. |
+
+<details>
+<summary><b>Why the wording of a refusal matters more than it sounds</b></summary>
+
+<br>
+
+The block message says, in these words, that it is **a timing conflict, not a
+permission one**.
+
+An earlier version phrased it as a permission problem, and agents responded by
+looking for another way in: a shell command, an interpreter, anything that was
+not the tool that had just refused them. Framing it as scheduling is what makes
+an agent wait and retry instead of routing around the guard.
+
+Same mechanism, opposite behaviour, purely from the sentence.
+
+</details>
+
+<details>
+<summary><b>Closing the obvious bypass</b></summary>
+
+<br>
+
+Enforcement only at the edit tool is sidestepped by `sed -i`. Shell commands are
+scanned for the paths they are likely to write, which turned out to need real
+care:
+
+- `sed -n '1,10p' file` **reads**, and flagging it would block normal work
+- `find . | xargs sed -i ...` hides the real command behind a wrapper
+- `cd src && tee ../src/api/users.go` means `src/api/users.go`
+- `"$TARGET"` cannot be resolved at all, and pretending otherwise is worse than
+  admitting it
+
+What cannot be resolved is reported rather than blocked, then verified after the
+fact. Blocking every `python3` invocation would get the tool uninstalled.
+
+</details>
+
+<details>
+<summary><b>Optional: hard rules, when the automatic behaviour cannot infer one</b></summary>
+
+<br>
+
+Most repos never need this. `interlock init --with-territory` writes:
 
 ```json
 {
@@ -103,26 +160,22 @@ Territory is declared per repo in `.interlock.json`:
 }
 ```
 
-A team can span vendors. Two Claude sessions and a Codex session can all be
-`backend`. Set `INTERLOCK_TEAM` to put one session on a team other than its
-agent's default.
+A team can span vendors: two Claude sessions and a Codex session can all be
+`backend`. `INTERLOCK_TEAM` puts one session on a team other than its agent's
+default. Everything automatic still applies on top.
 
-Add `.interlock/` to `.gitignore`. Leases are local runtime state.
+</details>
 
-### Codex needs the repo trusted
+---
 
-Codex loads project-local `.codex/hooks.json` only for a trusted project. Add a
-`projects."<path>".trust_level = "trusted"` entry to `~/.codex/config.toml`, or
-the hooks are skipped without saying so. Codex also exposes no session-end event,
-so its leases are freed by the time to live rather than on exit.
+## Proof
 
-## The verification that matters
+Not a description of intended behaviour. These are real Claude Code and Codex
+sessions in one shared checkout.
 
-All four run against real Claude Code and Codex sessions in one shared checkout.
-
-**Two agents, running at the same time, with no configuration at all.** Claude
-was told to make three separate edits to `src/shared.ts`. While it worked, Codex
-was told to add a comment to the same file. Codex reported:
+**Two agents, running at the same time, nothing configured.** Claude was told to
+make three separate edits to `src/shared.ts`. While it worked, Codex was told to
+add a comment to the same file. Codex reported:
 
 > The first write was blocked because `claude` held `src/shared.ts`. I waited,
 > re-read the file, saw another comment had been added, then applied the
@@ -131,144 +184,136 @@ was told to add a comment to the same file. Codex reported:
 All four edits survived. Neither agent lost the other's work, and neither was
 told anything by a human.
 
-**Territory, when it is declared, both directions:**
+<details>
+<summary><b>More of the record</b></summary>
 
-| Agent | Team | Own territory | Other team's territory |
-| --- | --- | --- | --- |
-| Claude Code | backend | `src/api/users.go` created | `src/components/Button.tsx` blocked |
-| Codex | frontend | `src/components/Card.tsx` created | `src/api/orders.go` blocked |
+<br>
 
-**Leases, across vendors.** Claude took `src/types/api.ts` and kept it. Codex,
-asked to edit the same file, said:
+**Territory, both directions.** With `claude` on backend and `codex` on frontend:
 
-> `src/types/api.ts` is currently leased by the backend team, agent `claude`,
-> session `70197b4e`. Because I am on the frontend team and the shared file is
-> already held by backend, I left the file unchanged.
+| Agent | Own territory | The other team's |
+|---|---|---|
+| Claude Code | `src/api/users.go` created | `src/components/Button.tsx` blocked |
+| Codex | `src/components/Card.tsx` created | `src/api/orders.go` blocked |
 
-**The shell bypass.** Claude, on backend, told to use `sed` on a frontend file,
-was blocked and offered to hand the work to the owning team instead. The file was
-unchanged.
+**The shell bypass.** Claude, told to `sed` a file outside its territory, was
+blocked and offered to hand the work to the owning team instead.
 
-**`init` against real settings.** Given a `.claude/settings.json` holding a model
-choice, a permissions block and the user's own `PreToolUse` guard, it added its
-four hooks, left every one of those intact, kept the user's guard first in the
-list, wrote a backup, appended to a `.gitignore` that had no trailing newline
-without joining the entries, and reported "already wired up" on a second run.
+**Verification.** An interpreter write that slipped past the guard was caught
+afterwards, reported into the agent's context, and reverted.
 
-**The dashboard.** Rendered both agents with the files they touched, the lease
-held by backend, and per-team active counts, in light and dark. Zero script tags,
-zero external URLs. It refused `--addr 0.0.0.0:7720`.
+**`init` against a real settings file** holding a model choice, a permissions
+block and the user's own `PreToolUse` guard: added its hooks, left all three
+intact, kept the user's guard first, wrote a backup, and reported "already wired
+up" on a second run.
 
-The point is not that the writes failed. It is that both agents read the reason
-and reasoned about it. That is awareness, not an error message.
+</details>
+
+---
+
+## Commands
+
+| | |
+|---|---|
+| `interlock init` | Wire the hooks into each agent's own settings. Merges, never replaces. Safe to run twice. |
+| `interlock init --dry-run` | Show exactly what would change first. |
+| `interlock init --uninstall` | Take only our hooks back out. |
+| `interlock doctor` | Find the ways this can be installed and silently not enforce. |
+| `interlock status` | Territory and who holds what, in the terminal. |
+| `interlock dashboard` | The panel. Loopback only, and it refuses any other address. |
+
+---
 
 ## Design rules
 
-- **This tool must never be the reason someone's work stopped.** A territory
-  violation and a held lease are the only things that block. An unreadable
-  payload, a broken config, or no config at all allows the call and says so on
-  stderr. Allowing costs a collision the user could already have had. Blocking on
-  our own bug costs a session that cannot write to its own repo.
-- **Nothing vendor-specific escapes `internal/hookio`.** Everything downstream
-  works on one normalised `Event`.
-- **Reads never mutate.** `Active` skips expired leases without deleting them, so
-  a reader and a writer never contend and the dashboard needs no lock.
+- **This tool must never be the reason someone's work stopped.** A real conflict
+  is the only thing that blocks. An unreadable payload, a broken config, or no
+  config at all allows the call and says so. Allowing costs a collision you could
+  already have had; blocking on our own bug costs a session that cannot write to
+  its own repo.
+- **Nothing vendor-specific escapes one package.** Everything downstream works on
+  a single normalised event, so a new agent is one adapter and nothing else.
+- **Reads never mutate.** Expired claims are skipped, not deleted, so a reader
+  and a writer never contend and the panel needs no lock.
 - **Zero runtime dependencies.** A hook runs on every tool call, so the artifact
   is one static binary with nothing to resolve at startup. That is also why this
   is Go and not Node: process start is on the hot path.
+- **The panel fetches nothing.** No script, no font, no CDN. It renders paths and
+  model names that came out of another tool's session files, so everything is
+  escaped and nothing leaves the machine.
 
-## Three bugs worth recording
+<details>
+<summary><b>Three bugs worth recording</b></summary>
 
-**The pid trap.** Leases first reclaimed any lease whose recorded process had
-exited, to recover quickly from a crash. A cross-process test found that this
-made every lease stealable: the hook is a short-lived process that exits
+<br>
+
+**The pid trap.** Claims first reclaimed any claim whose recorded process had
+exited, to recover quickly from a crash. A cross-process test found this made
+*every* claim stealable: the hook is a short-lived process that exits
 milliseconds after acquiring, so its pid is always dead. Three of twelve racing
-processes were each granted the same file. Liveness is now the time to live
-alone, and `Lease.PID` is informational only. The in-process race test passed
-throughout, which is why `crossprocess_test.go` exists.
+processes were each granted the same file. The in-process race test passed the
+entire time.
 
-**The guard that blocked its own fix.** After-the-fact verification told an agent
-it had written outside its territory and to revert it. The agent tried to delete
-the file and territory blocked that too, because the file still was not its to
-touch. Found by running it, not by a test: the tool demanded a fix and then
-prevented it. A flagged path is now writable by the session that was told to fix
-it, for that path only and for fifteen minutes.
+**The hook that never fired.** `PreToolUse` matched `Bash`; `PostToolUse` did
+not. So the tree was snapshotted before every unresolvable command and nothing
+ever compared it. Verification was dead on arrival while every unit test passed,
+and only a live agent session surfaced it.
 
-**flock, not a lock file.** A lock file is state that outlives the process that
-made it, so a crash leaves a stale lock and the next run deadlocks. An flock is
-held by the kernel on behalf of an open descriptor and is released when the
-process dies for any reason. It is held for microseconds around the
-read-decide-write section of `Acquire`, never across an agent's tool call.
+**The guard that blocked its own fix.** Verification told an agent it had written
+out of bounds and to revert it. The agent tried to delete the file and the guard
+blocked that too. The tool demanded a fix and then prevented it. A flagged path
+is now writable by the session told to fix it, for that path only and for fifteen
+minutes.
 
-## What is not built yet
+All three are covered by tests that were confirmed to fail when the bug is put
+back.
 
-Stated plainly, because a coordination tool that implies coverage it does not
-have is worse than none.
+</details>
 
-- **Opaque shell writes are caught after the fact, not before.** A command whose
-  target cannot be read off the command line is allowed, then checked. Outside a
-  git repo it cannot even be checked, and `interlock doctor` says so.
-- **Claude Code and Codex only.** Cursor and Gemini CLI both have hooks and
-  should slot into `hookio` without touching anything else.
-- **Unix only.** Leases need an advisory lock the kernel releases on process
-  death. Windows would need `LockFileEx`; the build fails loudly rather than
+---
+
+## Status
+
+Working, and verified end to end against real Claude Code and Codex sessions on
+one machine. Not yet used in anger.
+
+**Known limits, stated plainly, because a coordination tool that implies coverage
+it does not have is worse than none:**
+
+- Writes from commands whose target cannot be read in advance are caught *after*
+  the fact, not before. Outside a git repo they cannot be caught at all, and
+  `doctor` says so.
+- Claude Code and Codex only. Cursor and Gemini CLI both have hooks and should
+  slot in without touching anything else.
+- Unix only. Claims need an advisory lock the kernel releases on process death.
+  Windows would need `LockFileEx`, and the build fails loudly rather than
   degrading into a racing no-op.
-- **`init` cannot trust the repo for Codex.** That means editing
-  `~/.codex/config.toml`, a global file, and TOML without a parser is how you
-  corrupt someone's setup. It prints the two lines to add instead. Until they are
-  added, Codex skips its hooks silently and only Claude Code is coordinated.
-- **No test drives the two real agents against each other.** The wiring is now
-  covered by integration tests that run the actual binary, but the cross-vendor
-  claims in this README were checked by hand against live Claude Code and Codex
-  sessions. That is fine for a handful of runs and not fine for a product.
+- No automated test drives the two real agents against each other. Every
+  cross-vendor claim above was verified by hand.
 
-## Layout
+---
+
+## Repository
 
 ```
-cmd/interlock/       CLI: hook, status, init
+cmd/interlock/        the CLI, and tests that run the built binary
 internal/hookio/      payload normalisation, the only vendor-aware code
-internal/territory/   path globs to team ownership
-internal/lease/       one holder at a time on shared files
-internal/shellscan/   paths a shell command is likely to write
+internal/lease/       one holder at a time, flock-guarded
 internal/session/     who is here and what they last touched
-internal/journal/     what the tool actually prevented, capped
-internal/gitstate/    what a command changed, for after-the-fact checks
+internal/shellscan/   paths a shell command is likely to write
+internal/gitstate/    what a command actually changed
 internal/remedy/      narrow permission to undo a flagged write
-internal/lockfile/    the one advisory lock, released by the kernel on death
-internal/dashboard/   the live view, server-rendered
+internal/journal/     what was prevented, capped
+internal/territory/   optional path rules
+internal/dashboard/   the panel, server-rendered
 internal/install/     merging hooks into each agent's own settings
-internal/config/      per-repo .interlock.json
 ```
 
-`internal/hookio/testdata` holds payloads captured from real Claude Code and
-Codex sessions. If a vendor changes its envelope, those tests are how we find
-out.
+`internal/hookio/testdata` holds payloads captured from real sessions. If a
+vendor changes its envelope, those tests are how we find out.
 
-`cmd/interlock/main_test.go` runs the built binary against real payloads in real
-git repositories. Both of the bugs recorded above lived in the wiring between
-packages, where no unit test could see them, and both were reintroduced
-deliberately to confirm these tests fail on them. One of the two is caught only
-by `TestInstalledConfigActuallyFiresForEveryWritingTool`, which reads the
-settings `init` wrote and asks whether they would fire at all: every other test
-calls the hook with an event already chosen, which skips the matcher and hides
-exactly that class of fault.
+---
 
-## The failure this tool is most likely to have
-
-Installed but not enforcing, with nothing to tell you. Codex skips project hooks
-in a repo it does not trust and says nothing about it, so half a setup looks
-exactly like a working one until two agents collide.
-
-`interlock doctor` exists for that:
-
-```
-ok    config                  2 teams, root /your/repo
-ok    claude hooks            4 events in .claude/settings.json
-ok    codex hooks             3 events in .codex/hooks.json
-FAIL  codex repo trust        this repo is NOT trusted, so Codex silently
-                              skips its hooks
-ok    after-the-fact checks   git available, opaque writes are verified
-ok    leases                  available
-```
-
-Run it after `init`, and any time the dashboard looks quieter than it should.
+<div align="center">
+<sub>© Greg Sheppard. All rights reserved.</sub>
+</div>

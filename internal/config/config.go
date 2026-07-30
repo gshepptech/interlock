@@ -13,7 +13,7 @@ import (
 	"slices"
 	"strings"
 
-	"interlock/internal/territory"
+	"github.com/gshepptech/interlock/internal/territory"
 )
 
 // FileName is looked for in the working directory and every parent up to the

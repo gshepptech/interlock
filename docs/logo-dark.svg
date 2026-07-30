@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Interlock">
+  <title>Interlock</title>
+  <g fill="none" stroke-width="10" stroke-linecap="round">
+    <!-- held: cut where the other route crosses -->
+    <path d="M54 10 L40 24" stroke="#e0616c"/>
+    <path d="M24 40 L10 54" stroke="#e0616c"/>
+    <!-- set: straight through, unbroken -->
+    <path d="M10 10 L54 54" stroke="#e6ebee"/>
+  </g>
+</svg>

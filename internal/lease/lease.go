@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"interlock/internal/lockfile"
+	"github.com/gshepptech/interlock/internal/lockfile"
 )
 
 // DefaultTTL is how long a declared shared file is held without being renewed.

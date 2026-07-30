@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"interlock/internal/config"
-	"interlock/internal/journal"
-	"interlock/internal/lease"
-	"interlock/internal/session"
+	"github.com/gshepptech/interlock/internal/config"
+	"github.com/gshepptech/interlock/internal/journal"
+	"github.com/gshepptech/interlock/internal/lease"
+	"github.com/gshepptech/interlock/internal/session"
 )
 
 func loadConfig(t *testing.T, body string) *config.Config {

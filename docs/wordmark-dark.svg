@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 424 64" width="424" height="64" role="img" aria-label="Interlock">
+  <title>Interlock</title>
+  <g fill="none" stroke-width="10" stroke-linecap="round">
+    <path d="M54 10 L40 24" stroke="#e0616c"/>
+    <path d="M24 40 L10 54" stroke="#e0616c"/>
+    <path d="M10 10 L54 54" stroke="#e6ebee"/>
+  </g>
+  <text x="84" y="42" fill="#e6ebee" font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif"
+        font-size="29" font-weight="700" letter-spacing="8">INTERLOCK</text>
+</svg>

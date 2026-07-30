@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"interlock/internal/lockfile"
+	"github.com/gshepptech/interlock/internal/lockfile"
 )
 
 // Keep is how many entries survive a trim. Enough to cover a working day of
