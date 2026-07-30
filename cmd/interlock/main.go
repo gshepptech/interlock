@@ -269,11 +269,10 @@ func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.
 					time.Since(current.Acquired).Round(time.Second)),
 			})
 			fmt.Fprintf(os.Stderr,
-				"Blocked by interlock: %s is being worked on by another agent "+
-					"right now (%s). This is a timing conflict, not a permission "+
-					"one: work on something else and come back to it. Do not try "+
-					"to write it another way.\n",
-				relPath, current.Describe(time.Now()))
+				"Blocked by interlock: %s This is a timing conflict, not a "+
+					"permission one: work on something else and come back to it. "+
+					"Do not try to write it another way.\n",
+				current.Describe(time.Now()))
 			return exitBlock
 		}
 	}

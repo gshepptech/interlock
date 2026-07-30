@@ -209,9 +209,10 @@ func TestTwoAgentsCoordinateWithNoConfigAtAll(t *testing.T) {
 		t.Fatalf("exit = %d, want the second agent blocked from a file being worked on",
 			second.exit)
 	}
-	// The message has to say it is about timing, or an agent reads it as a
-	// permission problem and looks for another way in.
-	for _, want := range []string{"src/api/users.go", "another agent", "timing"} {
+	// Naming the holder gives the blocked agent something to act on, and saying
+	// it is about timing stops it reading the refusal as a permission problem
+	// and looking for another way in.
+	for _, want := range []string{"src/api/users.go", "claude", "timing"} {
 		if !strings.Contains(second.stderr, want) {
 			t.Errorf("block message missing %q: %s", want, second.stderr)
 		}

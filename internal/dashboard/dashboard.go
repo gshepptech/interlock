@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"interlock/internal/config"
@@ -52,9 +53,43 @@ type SessionView struct {
 	Model    string
 	Started  string
 	LastSeen string
-	Idle     bool
 	Recent   []TouchView
 	ShortID  string
+	// Aspect is the signal this agent is showing: proceeding, waiting, or
+	// stopped. It is the one piece of state a person scanning the page needs,
+	// so it is computed here rather than left to the template.
+	Aspect Aspect
+	// Areas are the directories this agent has been writing in. More useful at a
+	// glance than a file list: it says which part of the repo is busy.
+	Areas []string
+	// Latest is the last file written, kept alongside Areas because "which part
+	// of the repo" and "what exactly" answer different questions.
+	Latest *TouchView
+	Holds  int
+}
+
+// Aspect is an agent's current state, named for the signal it would be showing.
+type Aspect string
+
+const (
+	// Proceeding: working, nothing in its way.
+	Proceeding Aspect = "proceeding"
+	// Waiting: alive but quiet, most likely thinking.
+	Waiting Aspect = "waiting"
+	// Stopped: was refused a file within the last minute.
+	Stopped Aspect = "stopped"
+)
+
+// Label is the plain word shown to a person. The railway vocabulary shapes how
+// the page looks; it does not get in the way of reading it.
+func (a Aspect) Label() string {
+	switch a {
+	case Stopped:
+		return "blocked"
+	case Waiting:
+		return "waiting"
+	}
+	return "working"
 }
 
 type TouchView struct {
@@ -104,6 +139,19 @@ func Build(cfg *config.Config, sessions []*session.Session, leases []*lease.Leas
 		})
 	}
 
+	// A block within the last minute is what makes an agent read as stopped
+	// rather than merely quiet, so the journal has to be consulted per session.
+	blockedRecently := map[string]bool{}
+	for _, e := range events {
+		if e.Kind != journal.EscapedGuard && now.Sub(e.At) < time.Minute {
+			blockedRecently[e.SessionID] = true
+		}
+	}
+	holdsBySession := map[string]int{}
+	for _, l := range leases {
+		holdsBySession[l.SessionID]++
+	}
+
 	activeByTeam := map[string]int{}
 	for _, s := range sessions {
 		activeByTeam[s.Team]++
@@ -113,13 +161,32 @@ func Build(cfg *config.Config, sessions []*session.Session, leases []*lease.Leas
 			Model:    s.Model,
 			Started:  since(now, s.Started),
 			LastSeen: since(now, s.LastSeen),
-			// A session quiet for a while is probably thinking, not gone. Worth
-			// showing differently so a stalled agent is visible.
-			Idle:    now.Sub(s.LastSeen) > 2*time.Minute,
-			ShortID: short(s.ID),
+			ShortID:  short(s.ID),
+			Holds:    holdsBySession[s.ID],
+			Aspect:   Proceeding,
 		}
+		switch {
+		case blockedRecently[s.ID]:
+			sv.Aspect = Stopped
+		case now.Sub(s.LastSeen) > 2*time.Minute:
+			// Quiet for a while is probably thinking, not gone. Worth showing
+			// differently so a stalled agent is visible.
+			sv.Aspect = Waiting
+		}
+
+		seen := map[string]bool{}
 		for _, t := range s.Recent {
-			sv.Recent = append(sv.Recent, TouchView{Path: t.Path, Ago: since(now, t.At)})
+			touch := TouchView{Path: t.Path, Ago: since(now, t.At)}
+			sv.Recent = append(sv.Recent, touch)
+			if sv.Latest == nil {
+				sv.Latest = &touch
+			}
+			if dir := filepath.Dir(t.Path); dir != "." && !seen[dir] {
+				seen[dir] = true
+				if len(sv.Areas) < 3 {
+					sv.Areas = append(sv.Areas, dir)
+				}
+			}
 		}
 		v.Sessions = append(v.Sessions, sv)
 	}
@@ -215,149 +282,251 @@ func short(id string) string {
 	return id
 }
 
-// The palette is warm dark with two functional accents, and it follows the
-// viewer's light or dark preference. Green means holding or in your own
-// territory, rust means contention. Nothing is coloured for decoration.
+// The page is built to look like a signalling panel, because an interlocking is
+// one. Files are track sections that are occupied or clear, and each agent shows
+// an aspect: green proceeding, amber waiting, red stopped. Those three colours
+// are the railway's own system rather than decoration, which is why they are the
+// only colour on the page.
 //
-// System fonts, deliberately: a vendored font would be bytes to ship and a
-// remote font would be a network call, and this page must make neither.
+// The vocabulary stays in the visual language and out of the writing. A person
+// reading this needs to know an agent is blocked, not that a signal is at
+// danger, so every word on the page is plain.
+//
+// System fonts, because the page must fetch nothing: a vendored face would be
+// bytes to ship and a remote one would be a network call. The personality comes
+// from the treatment instead, letterspaced panel legends over tabular data.
 var page = template.Must(template.New("dashboard").Parse(`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="{{.RefreshSecs}}">
-<title>interlock</title>
-<!-- An empty data URI, so the browser does not request a favicon this server
-     would 404. A page that refreshes every few seconds would otherwise log an
-     error every few seconds. -->
+<title>Interlock</title>
 <link rel="icon" href="data:,">
 <style>
 :root {
-  --bg: #f6f4ef; --panel: #fffefb; --ink: #1b1a17; --muted: #6d675d;
-  --rule: #ddd7c9; --hold: #1f6b52; --contend: #9a4118;
-  color-scheme: light dark;
+  --panel:      #ffffff;
+  --deck:       #e8ebed;
+  --ink:        #14181b;
+  --ink-2:      #5b666d;
+  --ink-3:      #8b959b;
+  --rule:       #ccd3d7;
+  --rule-hard:  #aab4ba;
+  --proceeding: #1c7a4b;
+  --waiting:    #b57500;
+  --stopped:    #bd1f2d;
+  --occupied:   #14181b;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #171613; --panel: #1f1e1a; --ink: #ece8df; --muted: #948d80;
-    --rule: #322f28; --hold: #63b592; --contend: #d98457;
+    --panel:      #1b2024;
+    --deck:       #111518;
+    --ink:        #e6ebee;
+    --ink-2:      #98a4ab;
+    --ink-3:      #6d787f;
+    --rule:       #2b3238;
+    --rule-hard:  #3d464d;
+    --proceeding: #43b47c;
+    --waiting:    #d99a2b;
+    --stopped:    #e0616c;
+    --occupied:   #e6ebee;
   }
 }
 * { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
 body {
-  margin: 0; padding: 2rem 1.25rem; background: var(--bg); color: var(--ink);
-  font: 14px/1.55 ui-sans-serif, system-ui, sans-serif;
+  margin: 0; background: var(--deck); color: var(--ink);
+  font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-variant-numeric: tabular-nums;
 }
-.wrap { max-width: 68rem; margin: 0 auto; }
-header { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; align-items: baseline;
-  border-bottom: 1px solid var(--rule); padding-bottom: .75rem; margin-bottom: 1.5rem; }
-h1 { font-size: 1.05rem; margin: 0; letter-spacing: .01em; }
-h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .09em;
-  color: var(--muted); margin: 2rem 0 .6rem; font-weight: 600; }
-.mono, code, td, th { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.meta { color: var(--muted); font-size: .82rem; }
-.card { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px;
-  padding: .85rem 1rem; margin-bottom: .6rem; }
-.row { display: flex; flex-wrap: wrap; gap: .4rem 1rem; align-items: baseline; }
-.grow { flex: 1 1 12rem; }
-.tag { font-family: ui-monospace, monospace; font-size: .78rem; padding: .1rem .45rem;
-  border: 1px solid var(--rule); border-radius: 3px; color: var(--muted); }
-.hold { color: var(--hold); border-color: var(--hold); }
-.contend { color: var(--contend); border-color: var(--contend); }
-.files { margin: .5rem 0 0; padding: 0; list-style: none;
-  font-family: ui-monospace, monospace; font-size: .82rem; }
-.files li { display: flex; justify-content: space-between; gap: 1rem;
-  padding: .12rem 0; border-top: 1px dotted var(--rule); }
-.files li span:last-child { color: var(--muted); white-space: nowrap; }
+.mono, code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 0 16px 56px; }
+
+/* Panel header: the plate on the front of the equipment. */
+.head {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px;
+  padding: 18px 0 14px; border-bottom: 2px solid var(--rule-hard);
+}
+.mark {
+  font-size: 13px; font-weight: 700; letter-spacing: .34em; text-transform: uppercase;
+}
+.repo { flex: 1 1 auto; color: var(--ink-2); font-size: 12px; word-break: break-all; }
+.clock { color: var(--ink-3); font-size: 11px; letter-spacing: .06em; }
+
+/* Indications: the counters along the top of a panel. */
+.indications {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  border-bottom: 1px solid var(--rule); background: var(--panel);
+}
+.ind { padding: 14px 16px; border-right: 1px solid var(--rule); }
+.ind:last-child { border-right: 0; }
+.ind b {
+  display: block; font-family: ui-monospace, monospace; font-size: 30px;
+  font-weight: 500; line-height: 1.05; letter-spacing: -.02em;
+}
+.ind span {
+  display: block; margin-top: 5px; font-size: 10px; font-weight: 600;
+  letter-spacing: .13em; text-transform: uppercase; color: var(--ink-3);
+}
+.ind.alert b { color: var(--stopped); }
+
+h2 {
+  margin: 30px 0 0; padding-bottom: 7px; border-bottom: 1px solid var(--rule);
+  font-size: 10px; font-weight: 700; letter-spacing: .15em; text-transform: uppercase;
+  color: var(--ink-3);
+}
+h2 em { font-style: normal; color: var(--ink-3); font-weight: 500; letter-spacing: .04em; text-transform: none; }
+
+table { width: 100%; border-collapse: collapse; background: var(--panel); }
 .scroll { overflow-x: auto; }
-.empty { color: var(--muted); font-style: italic; }
-.warn { border-left: 3px solid var(--contend); padding-left: .8rem; color: var(--muted); }
-.paths { color: var(--muted); font-size: .82rem; word-break: break-all; }
+th {
+  text-align: left; padding: 9px 12px; font-size: 10px; font-weight: 600;
+  letter-spacing: .11em; text-transform: uppercase; color: var(--ink-3);
+  border-bottom: 1px solid var(--rule); white-space: nowrap;
+}
+td { padding: 11px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+.num { text-align: right; font-family: ui-monospace, monospace; color: var(--ink-2); white-space: nowrap; }
+
+/* The signature: an illuminated aspect. Colour carries state, never decoration. */
+.aspect { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.lamp {
+  width: 11px; height: 11px; border-radius: 50%; flex: none;
+  box-shadow: 0 0 0 2.5px color-mix(in srgb, currentColor 18%, transparent);
+}
+.proceeding { color: var(--proceeding); }
+.waiting    { color: var(--waiting); }
+.stopped    { color: var(--stopped); }
+.lamp.proceeding { background: var(--proceeding); }
+.lamp.waiting    { background: var(--waiting); }
+.lamp.stopped    { background: var(--stopped); }
+.aspect b { font-size: 12px; font-weight: 600; }
+
+.who { font-weight: 600; }
+.meta { color: var(--ink-3); font-size: 11px; }
+.areas { color: var(--ink-2); font-size: 12px; }
+.areas span + span:before { content: " · "; color: var(--ink-3); }
+
+/* An occupied section: a solid bar of track before the path. */
+.section { display: flex; align-items: center; gap: 9px; }
+.section:before {
+  content: ""; width: 16px; height: 3px; background: var(--occupied); flex: none;
+}
+.files { margin: 0; padding: 0; list-style: none; }
+.files li { display: flex; justify-content: space-between; gap: 16px; padding: 1px 0; }
+.files li span:last-child { color: var(--ink-3); }
+
+.empty { background: var(--panel); padding: 18px 14px; color: var(--ink-2); }
+.empty code { color: var(--ink); }
+.note {
+  background: var(--panel); border-left: 3px solid var(--waiting);
+  padding: 12px 14px; margin-top: 12px; color: var(--ink-2);
+}
+@media (max-width: 620px) {
+  .hide-narrow { display: none; }
+  .ind b { font-size: 24px; }
+}
 </style>
 </head>
 <body>
 <div class="wrap">
-<header>
-  <h1>interlock</h1>
-  <span class="meta mono grow">{{.Root}}</span>
-  <span class="meta">{{.GeneratedAt}}, refreshing every {{.RefreshSecs}}s</span>
+
+<header class="head">
+  <span class="mark">Interlock</span>
+  <span class="repo mono">{{.Root}}</span>
+  <span class="clock mono">{{.GeneratedAt}} · {{.RefreshSecs}}s</span>
 </header>
 
-{{if .Warning}}<p class="warn">{{.Warning}}</p>{{end}}
+<section class="indications">
+  <div class="ind"><b>{{len .Sessions}}</b><span>Agents</span></div>
+  <div class="ind"><b>{{len .Leases}}</b><span>Files held</span></div>
+  <div class="ind"><b>{{.Prevented}}</b><span>Collisions stopped</span></div>
+  <div class="ind{{if .Escaped}} alert{{end}}"><b>{{.Escaped}}</b><span>Got through</span></div>
+</section>
 
-<h2>Agents here now</h2>
+{{if .Warning}}<p class="note">{{.Warning}}</p>{{end}}
+
+<h2>Agents</h2>
 {{if .Sessions}}
+<div class="scroll"><table>
+  <tr>
+    <th>State</th><th>Agent</th><th class="hide-narrow">Model</th>
+    <th>Working in</th><th class="num">Holds</th>
+    <th class="num">Last write</th><th class="num hide-narrow">Running</th>
+  </tr>
   {{range .Sessions}}
-  <div class="card">
-    <div class="row">
-      <strong class="grow">{{.Agent}}{{if .Team}} on {{.Team}}{{end}}</strong>
-      {{if .Model}}<span class="tag">{{.Model}}</span>{{end}}
-      <span class="tag{{if .Idle}} contend{{end}}">
-        {{if .Idle}}quiet {{.LastSeen}}{{else}}active {{.LastSeen}} ago{{end}}
-      </span>
-      <span class="meta mono">{{.ShortID}}</span>
-      <span class="meta">up {{.Started}}</span>
-    </div>
-    {{if .Recent}}
-    <ul class="files">
-      {{range .Recent}}<li><span>{{.Path}}</span><span>{{.Ago}} ago</span></li>{{end}}
-    </ul>
-    {{end}}
-  </div>
+  <tr>
+    <td><span class="aspect {{.Aspect}}"><i class="lamp {{.Aspect}}"></i><b>{{.Aspect.Label}}</b></span></td>
+    <td>
+      <div class="who">{{.Agent}}{{if .Team}} <span class="meta">{{.Team}}</span>{{end}}</div>
+      <div class="meta mono">{{.ShortID}}</div>
+    </td>
+    <td class="hide-narrow meta mono">{{.Model}}</td>
+    <td class="areas mono">
+      {{range .Areas}}<span>{{.}}</span>{{else}}<span class="meta">nothing yet</span>{{end}}
+      {{with .Latest}}<div class="meta mono">{{.Path}}</div>{{end}}
+    </td>
+    <td class="num">{{.Holds}}</td>
+    <td class="num">{{.LastSeen}}</td>
+    <td class="num hide-narrow">{{.Started}}</td>
+  </tr>
   {{end}}
+</table></div>
 {{else}}
-  <p class="empty">Nobody is working here.</p>
+<p class="empty">No agent is working here. Open Claude Code or Codex in this
+repository and they will appear.</p>
 {{end}}
 
-<h2>What this has prevented</h2>
-{{if .Events}}
-  <div class="row" style="margin-bottom:.6rem">
-    <span class="tag hold">{{.Prevented}} collision{{if ne .Prevented 1}}s{{end}} prevented</span>
-    {{if .Escaped}}<span class="tag contend">{{.Escaped}} got through</span>{{end}}
-  </div>
-  {{range .Events}}
-  <div class="card">
-    <div class="row">
-      <code class="grow">{{.Path}}</code>
-      <span class="tag{{if .Escaped}} contend{{else}} hold{{end}}">{{.Label}}</span>
-      <span class="meta">{{.Ago}} ago</span>
-    </div>
-    <div class="paths">{{.Agent}} on {{.Team}}: {{.Detail}}</div>
-  </div>
-  {{end}}
-{{else}}
-  <p class="empty">Nothing has been blocked. Either the agents have stayed in their
-  own territory, or the hooks are not wired up. Run <code>interlock doctor</code>
-  to tell the difference.</p>
-{{end}}
-
-<h2>Shared files held</h2>
+<h2>Files held <em>claimed while an agent works on them, released when it moves on</em></h2>
 {{if .Leases}}
+<div class="scroll"><table>
+  <tr><th>Section</th><th>Held by</th><th class="num">For</th></tr>
   {{range .Leases}}
-  <div class="card row">
-    <code class="grow">{{.Path}}</code>
-    <span class="tag hold">{{.Team}}</span>
-    <span class="meta">{{.Agent}}, {{.ShortID}}, for {{.Held}}</span>
-  </div>
+  <tr>
+    <td><span class="section mono">{{.Path}}</span></td>
+    <td>{{.Agent}}{{if .Team}} <span class="meta">{{.Team}}</span>{{end}} <span class="meta mono">{{.ShortID}}</span></td>
+    <td class="num">{{.Held}}</td>
+  </tr>
   {{end}}
+</table></div>
 {{else}}
-  <p class="empty">Nothing held. Shared files are free.</p>
+<p class="empty">Every file is clear.</p>
 {{end}}
 
-<h2>Territory</h2>
-{{range .Teams}}
-<div class="card">
-  <div class="row">
-    <strong class="grow">{{.Name}}</strong>
-    {{if .Agents}}<span class="meta">default for {{range $i, $a := .Agents}}{{if $i}}, {{end}}{{$a}}{{end}}</span>{{end}}
-    <span class="tag{{if .Active}} hold{{end}}">{{.Active}} active</span>
-    {{if .Holding}}<span class="tag hold">holding {{.Holding}}</span>{{end}}
-  </div>
-  <div class="paths scroll">owns {{range $i, $p := .Owns}}{{if $i}} · {{end}}{{$p}}{{end}}</div>
-  {{if .Shared}}<div class="paths scroll">shared {{range $i, $p := .Shared}}{{if $i}} · {{end}}{{$p}}{{end}}</div>{{end}}
-</div>
+<h2>What was stopped</h2>
+{{if .Events}}
+<div class="scroll"><table>
+  <tr><th class="num">Ago</th><th>What happened</th><th>File</th><th class="hide-narrow">Why</th></tr>
+  {{range .Events}}
+  <tr>
+    <td class="num">{{.Ago}}</td>
+    <td><span class="aspect {{if .Escaped}}waiting{{else}}stopped{{end}}"><i class="lamp {{if .Escaped}}waiting{{else}}stopped{{end}}"></i><b>{{.Label}}</b></span></td>
+    <td class="mono">{{.Path}}</td>
+    <td class="hide-narrow meta">{{.Agent}}{{if .Team}} on {{.Team}}{{end}}: {{.Detail}}</td>
+  </tr>
+  {{end}}
+</table></div>
+{{else}}
+<p class="empty">Nothing has been stopped. Either the agents have stayed out of
+each other's way, or the hooks are not wired up. Run <code>interlock doctor</code>
+to tell the difference.</p>
 {{end}}
+
+{{if .Teams}}
+<h2>Territory <em>declared rules, applied on top of the automatic behaviour</em></h2>
+<div class="scroll"><table>
+  <tr><th>Team</th><th>Owns</th><th class="hide-narrow">Shared</th><th class="num">Agents</th></tr>
+  {{range .Teams}}
+  <tr>
+    <td class="who">{{.Name}}</td>
+    <td class="areas mono">{{range .Owns}}<span>{{.}}</span>{{end}}</td>
+    <td class="hide-narrow areas mono">{{range .Shared}}<span>{{.}}</span>{{end}}</td>
+    <td class="num meta">{{range $i, $a := .Agents}}{{if $i}}, {{end}}{{$a}}{{end}}</td>
+  </tr>
+  {{end}}
+</table></div>
+{{end}}
+
 </div>
 </body>
 </html>

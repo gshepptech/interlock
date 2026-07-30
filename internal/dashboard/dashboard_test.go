@@ -72,9 +72,9 @@ func TestBuildCountsActiveSessionsAndHeldFilesPerTeam(t *testing.T) {
 	}
 }
 
-// A session quiet for a while is probably thinking. Showing it differently is
-// how a stalled agent becomes visible.
-func TestQuietSessionIsMarkedIdle(t *testing.T) {
+// The aspect is the one thing a person scanning the page reads, so each of the
+// three states has to come from something real.
+func TestAspectReflectsWhatEachAgentIsDoing(t *testing.T) {
 	now := time.Now()
 	cfg := loadConfig(t, sample)
 
@@ -82,17 +82,69 @@ func TestQuietSessionIsMarkedIdle(t *testing.T) {
 		{ID: "busy", Agent: "claude", Team: "backend", Started: now, LastSeen: now},
 		{ID: "quiet", Agent: "codex", Team: "frontend", Started: now,
 			LastSeen: now.Add(-5 * time.Minute)},
-	}, nil, nil, now)
+		{ID: "hitwall", Agent: "codex", Team: "frontend", Started: now, LastSeen: now},
+	}, nil, []journal.Entry{
+		{At: now.Add(-10 * time.Second), Kind: journal.BlockedLease,
+			SessionID: "hitwall", Path: "a.go"},
+	}, now)
 
 	byID := map[string]SessionView{}
 	for _, s := range v.Sessions {
 		byID[s.ShortID] = s
 	}
-	if byID["busy"].Idle {
-		t.Error("an active session was marked idle")
+	if got := byID["busy"].Aspect; got != Proceeding {
+		t.Errorf("a working session shows %q, want proceeding", got)
 	}
-	if !byID["quiet"].Idle {
-		t.Error("a session quiet for five minutes was not marked idle")
+	if got := byID["quiet"].Aspect; got != Waiting {
+		t.Errorf("a session quiet for five minutes shows %q, want waiting", got)
+	}
+	if got := byID["hitwall"].Aspect; got != Stopped {
+		t.Errorf("a session blocked ten seconds ago shows %q, want stopped", got)
+	}
+	// The words on the page stay plain, whatever the visual language is.
+	if got := Stopped.Label(); got != "blocked" {
+		t.Errorf("Stopped.Label() = %q, want the plain word", got)
+	}
+}
+
+// A block long past should not leave an agent looking stuck.
+func TestAnOldBlockDoesNotKeepAnAgentStopped(t *testing.T) {
+	now := time.Now()
+	cfg := loadConfig(t, sample)
+
+	v := Build(cfg,
+		[]*session.Session{{ID: "s1", Agent: "claude", Started: now, LastSeen: now}},
+		nil,
+		[]journal.Entry{{At: now.Add(-30 * time.Minute), Kind: journal.BlockedLease,
+			SessionID: "s1", Path: "a.go"}},
+		now)
+
+	if got := v.Sessions[0].Aspect; got != Proceeding {
+		t.Errorf("aspect = %q after a half-hour-old block, want proceeding", got)
+	}
+}
+
+// The directories an agent is in say which part of the repo is busy, which is
+// more use at a glance than a list of files.
+func TestWorkingAreasAreDeduplicatedDirectories(t *testing.T) {
+	now := time.Now()
+	cfg := loadConfig(t, sample)
+
+	v := Build(cfg, []*session.Session{{
+		ID: "s1", Agent: "claude", Started: now, LastSeen: now,
+		Recent: []session.Touch{
+			{Path: "src/api/users.go", At: now},
+			{Path: "src/api/orders.go", At: now},
+			{Path: "src/types/api.ts", At: now},
+		},
+	}}, nil, nil, now)
+
+	areas := v.Sessions[0].Areas
+	if len(areas) != 2 {
+		t.Fatalf("areas = %v, want two distinct directories", areas)
+	}
+	if areas[0] != "src/api" || areas[1] != "src/types" {
+		t.Errorf("areas = %v, want src/api then src/types", areas)
 	}
 }
 
@@ -148,7 +200,7 @@ func TestHandlerRendersTheState(t *testing.T) {
 	for _, want := range []string{
 		"claude", "backend", "opus", "src/api/users.go", "src/types/api.ts",
 		"abcdef12", "src/components/**", "codex", "src/api/orders.go",
-		"blocked, wrong territory", "1 collision",
+		"blocked, wrong territory", "Interlock",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page is missing %q", want)

@@ -310,8 +310,8 @@ func (l *Lease) Describe(now time.Time) string {
 	if l.Team != "" {
 		who += " on the " + l.Team + " team"
 	}
-	return fmt.Sprintf("%s, held by %s (session %s) for the last %s",
-		l.Path, who, shortID(l.SessionID), held)
+	return fmt.Sprintf("%s is being worked on by %s right now (session %s, "+
+		"for the last %s).", l.Path, who, shortID(l.SessionID), held)
 }
 
 func shortID(id string) string {
