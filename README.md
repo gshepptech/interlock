@@ -198,9 +198,10 @@ have is worse than none.
   `~/.codex/config.toml`, a global file, and TOML without a parser is how you
   corrupt someone's setup. It prints the two lines to add instead. Until they are
   added, Codex skips its hooks silently and only Claude Code is coordinated.
-- **No test drives the two agents against each other.** Every cross-vendor claim
-  in this README was checked by hand. That is fine for three runs and not fine
-  for a product.
+- **No test drives the two real agents against each other.** The wiring is now
+  covered by integration tests that run the actual binary, but the cross-vendor
+  claims in this README were checked by hand against live Claude Code and Codex
+  sessions. That is fine for a handful of runs and not fine for a product.
 
 ## Layout
 
@@ -223,6 +224,15 @@ internal/config/      per-repo .agentcoord.json
 `internal/hookio/testdata` holds payloads captured from real Claude Code and
 Codex sessions. If a vendor changes its envelope, those tests are how we find
 out.
+
+`cmd/agentcoord/main_test.go` runs the built binary against real payloads in real
+git repositories. Both of the bugs recorded above lived in the wiring between
+packages, where no unit test could see them, and both were reintroduced
+deliberately to confirm these tests fail on them. One of the two is caught only
+by `TestInstalledConfigActuallyFiresForEveryWritingTool`, which reads the
+settings `init` wrote and asks whether they would fire at all: every other test
+calls the hook with an event already chosen, which skips the matcher and hides
+exactly that class of fault.
 
 ## The failure this tool is most likely to have
 
