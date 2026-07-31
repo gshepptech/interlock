@@ -27,6 +27,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/gshepptech/interlock/internal/state"
 )
 
 // ErrNotAvailable means the tree cannot be watched: no git, or not a repo.
@@ -51,7 +53,8 @@ type file struct {
 
 // Snapshot is the state of a working tree at one moment.
 type Snapshot struct {
-	Files map[string]file `json:"files"`
+	Version int             `json:"version"`
+	Files   map[string]file `json:"files"`
 }
 
 // Take records the working tree.
@@ -71,7 +74,7 @@ func Take(root string) (*Snapshot, error) {
 		return nil, fmt.Errorf("%w: %v", ErrNotAvailable, err)
 	}
 
-	snap := &Snapshot{Files: map[string]file{}}
+	snap := &Snapshot{Version: state.CurrentVersion, Files: map[string]file{}}
 	for record := range bytes.SplitSeq(out, []byte{0}) {
 		if len(record) < 4 {
 			continue

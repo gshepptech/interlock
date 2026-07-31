@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gshepptech/interlock/internal/lockfile"
+	"github.com/gshepptech/interlock/internal/state"
 )
 
 // DefaultTTL is how long a declared shared file is held without being renewed.
@@ -45,6 +46,7 @@ const ImplicitTTL = 90 * time.Second
 
 // Lease records who holds a path.
 type Lease struct {
+	Version   int    `json:"version"`
 	Path      string `json:"path"` // repo-relative
 	Team      string `json:"team"`
 	Agent     string `json:"agent"`
@@ -94,10 +96,44 @@ func Open(root string) (*Store, error) {
 
 func open(root string, ttl time.Duration, now func() time.Time) (*Store, error) {
 	dir := filepath.Join(root, ".interlock", "leases")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create lease dir: %w", err)
-	}
 	return &Store{dir: dir, ttl: ttl, now: now}, nil
+}
+
+// Check verifies advisory-lock support and any existing lease state without
+// creating directories or files. A missing state directory is healthy because
+// mutating operations create it on demand.
+func Check(root string) error {
+	if !lockfile.Supported() {
+		return ErrUnsupported
+	}
+	dir := filepath.Join(root, ".interlock", "leases")
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect lease directory: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("lease state path %s is not a directory", dir)
+	}
+	lockPath := filepath.Join(dir, ".lock")
+	lockInfo, err := os.Lstat(lockPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect lease lock: %w", err)
+	}
+	if !lockInfo.Mode().IsRegular() || lockInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("lease lock %s is not a regular file", lockPath)
+	}
+	unlock, err := lockfile.Acquire(lockPath)
+	if err != nil {
+		return fmt.Errorf("verify lease lock: %w", err)
+	}
+	unlock()
+	return nil
 }
 
 // Acquire claims path for holder.
@@ -113,6 +149,9 @@ func (s *Store) Acquire(path string, h Holder) (granted bool, current *Lease, er
 // taken because a file was written rather than because it was declared shared.
 func (s *Store) AcquireFor(path string, h Holder, hold time.Duration, implicit bool) (
 	granted bool, current *Lease, err error) {
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return false, nil, fmt.Errorf("create lease dir: %w", err)
+	}
 	unlock, err := lockfile.Acquire(filepath.Join(s.dir, ".lock"))
 	if err != nil {
 		return false, nil, err
@@ -125,6 +164,9 @@ func (s *Store) AcquireFor(path string, h Holder, hold time.Duration, implicit b
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		// Unheld.
+	case isUnsupportedVersion(err):
+		// Never overwrite state written by a newer Interlock binary.
+		return false, nil, err
 	case err != nil:
 		// A lease we cannot read is a lease we cannot honour. Treat it as
 		// absent and overwrite it: leaving an unreadable file to block a
@@ -167,6 +209,11 @@ func (s *Store) AcquireFor(path string, h Holder, hold time.Duration, implicit b
 // Release drops every lease held by a session. Called when a session ends, so a
 // tidy exit frees contract files immediately instead of after the time to live.
 func (s *Store) Release(sessionID string) (int, error) {
+	if _, err := os.Stat(s.dir); errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	} else if err != nil {
+		return 0, fmt.Errorf("inspect lease dir: %w", err)
+	}
 	unlock, err := lockfile.Acquire(filepath.Join(s.dir, ".lock"))
 	if err != nil {
 		return 0, err
@@ -184,8 +231,14 @@ func (s *Store) Release(sessionID string) (int, error) {
 			continue
 		}
 		file := filepath.Join(s.dir, e.Name())
-		l, err := readLease(file)
-		if err != nil || l.SessionID != sessionID {
+		l, err := decodeLease(file)
+		if err != nil {
+			if l != nil && l.SessionID == sessionID && isUnsupportedVersion(err) {
+				return released, err
+			}
+			continue
+		}
+		if l.SessionID != sessionID {
 			continue
 		}
 		if err := os.Remove(file); err == nil {
@@ -220,6 +273,28 @@ func (s *Store) Active() ([]*Lease, error) {
 	}
 	slices.SortFunc(out, func(a, b *Lease) int { return strings.Compare(a.Path, b.Path) })
 	return out, nil
+}
+
+// Inspect scans persisted lease records without mutating them.
+func (s *Store) Inspect() ([]state.Issue, error) {
+	entries, err := os.ReadDir(s.dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read lease dir: %w", err)
+	}
+	var issues []state.Issue
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(s.dir, entry.Name())
+		if _, err := readLease(path); err != nil {
+			issues = append(issues, state.Issue{Store: "lease", Path: path, Err: err})
+		}
+	}
+	return issues, nil
 }
 
 // live reports whether a lease still counts, on time to live alone.
@@ -257,6 +332,7 @@ func (s *Store) pathFor(path string) string {
 // write puts the lease in place atomically. A reader that globs mid-write sees
 // the finished file or no file, never half of one.
 func (s *Store) write(file string, l *Lease) error {
+	l.Version = state.CurrentVersion
 	enc, err := json.Marshal(l)
 	if err != nil {
 		return fmt.Errorf("encode lease: %w", err)
@@ -282,6 +358,14 @@ func (s *Store) write(file string, l *Lease) error {
 }
 
 func readLease(file string) (*Lease, error) {
+	l, err := decodeLease(file)
+	if err != nil {
+		return nil, err
+	}
+	return l, nil
+}
+
+func decodeLease(file string) (*Lease, error) {
 	raw, err := os.ReadFile(file)
 	if err != nil {
 		return nil, err
@@ -291,9 +375,17 @@ func readLease(file string) (*Lease, error) {
 		return nil, fmt.Errorf("parse lease %s: %w", file, err)
 	}
 	if l.SessionID == "" {
-		return nil, fmt.Errorf("lease %s has no session id", file)
+		return &l, fmt.Errorf("lease %s has no session id", file)
+	}
+	if err := state.Validate("lease", file, l.Version); err != nil {
+		return &l, err
 	}
 	return &l, nil
+}
+
+func isUnsupportedVersion(err error) bool {
+	var unsupported *state.UnsupportedVersionError
+	return errors.As(err, &unsupported)
 }
 
 // Describe renders a held lease for an agent to read. The consumer is a language
@@ -312,6 +404,24 @@ func (l *Lease) Describe(now time.Time) string {
 	}
 	return fmt.Sprintf("%s is being worked on by %s right now (session %s, "+
 		"for the last %s).", l.Path, who, shortID(l.SessionID), held)
+}
+
+// ExpiresAt returns when the lease becomes available without another renewal.
+func (l *Lease) ExpiresAt() time.Time {
+	hold := l.Hold
+	if hold <= 0 {
+		hold = DefaultTTL
+	}
+	return l.Renewed.Add(hold)
+}
+
+// Remaining returns the lease lifetime left at now, clamped at zero.
+func (l *Lease) Remaining(now time.Time) time.Duration {
+	remaining := l.ExpiresAt().Sub(now)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 func shortID(id string) string {

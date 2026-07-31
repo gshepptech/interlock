@@ -1,12 +1,16 @@
 package journal
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gshepptech/interlock/internal/state"
 )
 
 func store(t *testing.T, clock *time.Time) *Store {
@@ -43,6 +47,173 @@ func TestRecentIsNewestFirst(t *testing.T) {
 	}
 	if got[0].Path != "c.go" || got[2].Path != "a.go" {
 		t.Errorf("order = %s,%s,%s, want c,b,a", got[0].Path, got[1].Path, got[2].Path)
+	}
+}
+
+func TestAppendWritesCurrentVersion(t *testing.T) {
+	now := time.Now()
+	s := store(t, &now)
+	if err := s.Append(entry(BlockedLease, "a.go")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got, err := s.Recent(1)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("Recent = %+v err=%v", got, err)
+	}
+	if got[0].Version != state.CurrentVersion {
+		t.Errorf("version = %d, want %d", got[0].Version, state.CurrentVersion)
+	}
+}
+
+func TestControlEntriesUseJournalVersionTwoAndTypedFields(t *testing.T) {
+	now := time.Now()
+	s := store(t, &now)
+	want := Entry{
+		Kind: ControlAction, Actor: ActorDashboard, Action: ReleaseLeases,
+		Target: "session-1", Result: Completed, Detail: "released 2 leases",
+	}
+	if err := s.Append(want); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got, err := s.Recent(1)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("Recent = %+v err=%v", got, err)
+	}
+	if got[0].Version != ControlVersion || got[0].Actor != want.Actor ||
+		got[0].Action != want.Action || got[0].Result != want.Result {
+		t.Fatalf("control entry = %#v", got[0])
+	}
+}
+
+func TestAppendRejectsUntypedControlFields(t *testing.T) {
+	now := time.Now()
+	s := store(t, &now)
+	for name, candidate := range map[string]Entry{
+		"actor":  {Kind: ControlAction, Actor: "browser", Action: CleanupSession, Result: Completed},
+		"action": {Kind: ControlAction, Actor: ActorCLI, Action: "shell", Result: Completed},
+		"result": {Kind: ControlAction, Actor: ActorCLI, Action: CleanupSession, Result: "maybe"},
+	} {
+		if err := s.Append(candidate); err == nil {
+			t.Errorf("Append accepted unknown %s", name)
+		}
+	}
+}
+
+func TestMixedJournalPreventsPhaseZeroTrimAndPreservesControlOnPhaseOneTrim(t *testing.T) {
+	now := time.Now()
+	s := store(t, &now)
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	var body strings.Builder
+	for i := range trimAt + 20 {
+		e := entry(BlockedLease, "old.go")
+		e.Version = state.CurrentVersion
+		e.At = now.Add(time.Duration(i) * time.Second)
+		e.Detail = strings.Repeat("x", 300)
+		raw, _ := json.Marshal(e)
+		body.Write(raw)
+		body.WriteByte('\n')
+	}
+	control := Entry{
+		Version: ControlVersion, At: now.Add(time.Hour), Kind: ControlAction,
+		Actor: ActorCLI, Action: CleanupAll, Result: Completed, Detail: "done",
+	}
+	raw, _ := json.Marshal(control)
+	body.Write(raw)
+	body.WriteByte('\n')
+	if err := os.WriteFile(s.file, []byte(body.String()), 0o644); err != nil {
+		t.Fatalf("seed mixed journal: %v", err)
+	}
+
+	// This duplicates Phase 0's compatibility decision: version 2 is future,
+	// so its trim path must leave the entire file alone.
+	phaseZeroWouldTrim := true
+	for line := range strings.SplitSeq(body.String(), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var candidate Entry
+		if json.Unmarshal([]byte(line), &candidate) != nil {
+			continue
+		}
+		if err := state.Validate("journal", s.file, candidate.Version); err != nil {
+			var future *state.UnsupportedVersionError
+			if errors.As(err, &future) {
+				phaseZeroWouldTrim = false
+				break
+			}
+		}
+	}
+	if phaseZeroWouldTrim {
+		t.Fatal("Phase 0 contract would trim a journal containing control records")
+	}
+
+	if err := s.trimIfLong(); err != nil {
+		t.Fatalf("Phase 1 trim: %v", err)
+	}
+	entries, err := s.Recent(Keep + 1)
+	if err != nil {
+		t.Fatalf("Recent: %v", err)
+	}
+	if len(entries) != Keep || entries[0].Kind != ControlAction {
+		t.Fatalf("trimmed entries = %d newest=%#v", len(entries), entries[0])
+	}
+}
+
+func TestFutureJournalLinePreventsDestructiveTrim(t *testing.T) {
+	now := time.Now()
+	s := store(t, &now)
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	original := []byte(`{"version":99,"kind":"blocked_lease","path":"future.go"}` + "\n" +
+		strings.Repeat("x", 70*1024))
+	if err := os.WriteFile(s.file, original, 0o644); err != nil {
+		t.Fatalf("seed future journal: %v", err)
+	}
+	if err := s.trimIfLong(); err != nil {
+		t.Fatalf("trimIfLong: %v", err)
+	}
+	got, err := os.ReadFile(s.file)
+	if err != nil || string(got) != string(original) {
+		t.Fatalf("future journal changed: bytes=%d err=%v", len(got), err)
+	}
+}
+
+func TestMismatchedKindVersionsPreventDestructiveTrim(t *testing.T) {
+	for name, mismatch := range map[string]Entry{
+		"control_v1": {
+			Version: state.CurrentVersion, Kind: ControlAction, Actor: ActorCLI,
+			Action: CleanupAll, Result: Completed,
+		},
+		"coordination_v2": {
+			Version: ControlVersion, Kind: BlockedLease, Agent: "claude", Path: "x.go",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			now := time.Now()
+			s := store(t, &now)
+			if err := os.MkdirAll(s.dir, 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			raw, _ := json.Marshal(mismatch)
+			original := append(append(raw, '\n'), []byte(strings.Repeat("x", 70*1024))...)
+			if err := os.WriteFile(s.file, original, 0o644); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			if err := s.trimIfLong(); err != nil {
+				t.Fatalf("trimIfLong: %v", err)
+			}
+			after, err := os.ReadFile(s.file)
+			if err != nil || string(after) != string(original) {
+				t.Fatalf("mismatched known record was trimmed: bytes=%d err=%v", len(after), err)
+			}
+			issues, err := s.Inspect()
+			if err != nil || len(issues) == 0 || !errors.Is(issues[0].Err, errKindVersion) {
+				t.Fatalf("Inspect = %#v err=%v", issues, err)
+			}
+		})
 	}
 }
 
@@ -235,13 +406,13 @@ func TestConcurrentAppendsAllSurvive(t *testing.T) {
 	}
 }
 
-func TestOpenCreatesTheDirectory(t *testing.T) {
+func TestOpenDoesNotCreateTheDirectory(t *testing.T) {
 	root := t.TempDir()
 	now := time.Now()
 	if _, err := open(root, func() time.Time { return now }); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, ".interlock")); err != nil {
-		t.Errorf("directory not created: %v", err)
+	if _, err := os.Stat(filepath.Join(root, ".interlock")); !os.IsNotExist(err) {
+		t.Errorf("open mutated the repository: %v", err)
 	}
 }

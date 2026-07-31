@@ -22,6 +22,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/gshepptech/interlock/internal/lockfile"
+	"github.com/gshepptech/interlock/internal/state"
 )
 
 // IdleAfter is how long without a hook firing before a session is treated as
@@ -29,6 +32,19 @@ import (
 // is the only thing that stops a crashed session showing as live forever. It is
 // generous because a model can think for a long time between tool calls.
 const IdleAfter = 10 * time.Minute
+
+// RecentAfter is the short window in which hook recency is shown as recent.
+// It is not a claim that the model is actively producing work.
+const RecentAfter = 30 * time.Second
+
+// Observation is the presence state that can be inferred from hook timestamps.
+type Observation string
+
+const (
+	Recent Observation = "recent"
+	Quiet  Observation = "quiet"
+	Ended  Observation = "ended"
+)
 
 // RecentTouches is how many files to remember per session. Enough to show what
 // someone is working on, short enough that the file stays small.
@@ -43,6 +59,7 @@ type Touch struct {
 
 // Session is what one agent is doing right now.
 type Session struct {
+	Version  int       `json:"version"`
 	ID       string    `json:"id"`
 	Agent    string    `json:"agent"`
 	Team     string    `json:"team"`
@@ -59,6 +76,18 @@ func (s *Session) Idle(now time.Time) bool {
 	return now.Sub(s.LastSeen) > IdleAfter
 }
 
+// ObservationAt classifies only what hook recency proves.
+func (s *Session) ObservationAt(now time.Time) Observation {
+	switch {
+	case s.Idle(now):
+		return Ended
+	case now.Sub(s.LastSeen) > RecentAfter:
+		return Quiet
+	default:
+		return Recent
+	}
+}
+
 // Store is a directory of session state under a repo.
 type Store struct {
 	dir string
@@ -70,9 +99,6 @@ func Open(root string) (*Store, error) { return open(root, time.Now) }
 
 func open(root string, now func() time.Time) (*Store, error) {
 	dir := filepath.Join(root, ".interlock", "sessions")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create session dir: %w", err)
-	}
 	return &Store{dir: dir, now: now}, nil
 }
 
@@ -85,10 +111,18 @@ func (s *Store) Seen(id, agent, team, model, cwd string) error {
 	if id == "" {
 		return errors.New("session id is required")
 	}
-	cur, err := s.read(id)
+	unlock, err := s.lock(id)
 	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	cur, err := s.read(id)
+	if errors.Is(err, os.ErrNotExist) {
 		now := s.now()
 		cur = &Session{ID: id, Started: now}
+	} else if err != nil {
+		return err
 	}
 	cur.LastSeen = s.now()
 	// Later events carry better information than the first: a team may be
@@ -106,9 +140,17 @@ func (s *Store) Touched(id, tool string, paths []string) error {
 	if id == "" || len(paths) == 0 {
 		return nil
 	}
-	cur, err := s.read(id)
+	unlock, err := s.lock(id)
 	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	cur, err := s.read(id)
+	if errors.Is(err, os.ErrNotExist) {
 		cur = &Session{ID: id, Started: s.now()}
+	} else if err != nil {
+		return err
 	}
 	cur.LastSeen = s.now()
 
@@ -131,6 +173,20 @@ func (s *Store) End(id string) error {
 	if id == "" {
 		return nil
 	}
+	unlock, err := s.lock(id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.endLocked(id)
+}
+
+func (s *Store) endLocked(id string) error {
+	if _, err := s.read(id); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
 	err := os.Remove(s.pathFor(id))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove session: %w", err)
@@ -138,9 +194,79 @@ func (s *Store) End(id string) error {
 	return nil
 }
 
+// Stale lists sessions whose last event is at or before cutoff. It is read-only;
+// CleanupStale revalidates each result under the session lock before removal.
+func (s *Store) Stale(cutoff time.Time) ([]*Session, error) {
+	all, err := s.All()
+	if err != nil {
+		return nil, err
+	}
+	out := all[:0]
+	for _, sess := range all {
+		if !sess.LastSeen.After(cutoff) {
+			out = append(out, sess)
+		}
+	}
+	slices.SortFunc(out, func(a, b *Session) int {
+		return a.LastSeen.Compare(b.LastSeen)
+	})
+	return out, nil
+}
+
+// CleanupStale holds the session lock while rechecking liveness and removing
+// associated state through cleanup. The session record is removed last and is
+// retained when cleanup fails, so a later run can retry safely.
+func (s *Store) CleanupStale(id string, cutoff time.Time, cleanup func() error) (
+	*Session, bool, error) {
+	if id == "" {
+		return nil, false, errors.New("session id is required")
+	}
+	unlock, err := s.lock(id)
+	if err != nil {
+		return nil, false, err
+	}
+	defer unlock()
+
+	sess, err := s.read(id)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if sess.LastSeen.After(cutoff) {
+		return sess, false, nil
+	}
+	if cleanup != nil {
+		if err := cleanup(); err != nil {
+			return sess, false, err
+		}
+	}
+	if err := s.endLocked(id); err != nil {
+		return sess, false, err
+	}
+	return sess, true, nil
+}
+
 // Active lists sessions that have been seen recently, most recently seen first.
 // Idle sessions are skipped but not deleted, because reading must not mutate.
 func (s *Store) Active() ([]*Session, error) {
+	all, err := s.All()
+	if err != nil {
+		return nil, err
+	}
+	now := s.now()
+	out := all[:0]
+	for _, sess := range all {
+		if !sess.Idle(now) {
+			out = append(out, sess)
+		}
+	}
+	return out, nil
+}
+
+// All lists every readable session record, including expired observations.
+func (s *Store) All() ([]*Session, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -149,14 +275,13 @@ func (s *Store) Active() ([]*Session, error) {
 		return nil, fmt.Errorf("read session dir: %w", err)
 	}
 
-	now := s.now()
 	var out []*Session
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
 		sess, err := readFile(filepath.Join(s.dir, e.Name()))
-		if err != nil || sess.Idle(now) {
+		if err != nil {
 			continue
 		}
 		out = append(out, sess)
@@ -165,6 +290,36 @@ func (s *Store) Active() ([]*Session, error) {
 		return b.LastSeen.Compare(a.LastSeen)
 	})
 	return out, nil
+}
+
+// Get returns one session by its stable agent-provided identifier.
+func (s *Store) Get(id string) (*Session, error) {
+	if id == "" {
+		return nil, errors.New("session id is required")
+	}
+	return s.read(id)
+}
+
+// Inspect scans persisted session records without mutating them.
+func (s *Store) Inspect() ([]state.Issue, error) {
+	entries, err := os.ReadDir(s.dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read session dir: %w", err)
+	}
+	var issues []state.Issue
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(s.dir, entry.Name())
+		if _, err := readFile(path); err != nil {
+			issues = append(issues, state.Issue{Store: "session", Path: path, Err: err})
+		}
+	}
+	return issues, nil
 }
 
 func (s *Store) read(id string) (*Session, error) { return readFile(s.pathFor(id)) }
@@ -181,6 +336,9 @@ func readFile(file string) (*Session, error) {
 	if sess.ID == "" {
 		return nil, fmt.Errorf("session %s has no id", file)
 	}
+	if err := state.Validate("session", file, sess.Version); err != nil {
+		return nil, err
+	}
 	return &sess, nil
 }
 
@@ -189,14 +347,24 @@ func (s *Store) pathFor(id string) string {
 	return filepath.Join(s.dir, hex.EncodeToString(sum[:16])+".json")
 }
 
+func (s *Store) lock(id string) (func(), error) {
+	dir := filepath.Join(s.dir, ".locks")
+	unlock, err := lockfile.AcquireKeyed(dir, id)
+	if err != nil {
+		return nil, fmt.Errorf("lock session: %w", err)
+	}
+	return unlock, nil
+}
+
 // write installs the file atomically, so a dashboard reading mid-write sees the
 // finished file or the previous one, never half of either.
 //
-// There is no lock. Only the owning session writes its own file, so there is no
-// read-modify-write race between sessions to protect against. A session's own
-// hooks can overlap, and the loss in that case is one touch entry, which is not
-// worth a lock on the hot path.
+// Callers hold a keyed advisory lock around every read-modify-write operation.
 func (s *Store) write(sess *Session) error {
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return fmt.Errorf("create session dir: %w", err)
+	}
+	sess.Version = state.CurrentVersion
 	enc, err := json.Marshal(sess)
 	if err != nil {
 		return fmt.Errorf("encode session: %w", err)

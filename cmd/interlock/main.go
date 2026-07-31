@@ -8,10 +8,8 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,9 +19,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gshepptech/interlock/internal/cleanup"
 	"github.com/gshepptech/interlock/internal/config"
+	"github.com/gshepptech/interlock/internal/control"
+	"github.com/gshepptech/interlock/internal/controlhttp"
 	"github.com/gshepptech/interlock/internal/dashboard"
+	"github.com/gshepptech/interlock/internal/diagnostic"
 	"github.com/gshepptech/interlock/internal/gitstate"
+	"github.com/gshepptech/interlock/internal/handoffrequest"
 	"github.com/gshepptech/interlock/internal/hookio"
 	"github.com/gshepptech/interlock/internal/install"
 	"github.com/gshepptech/interlock/internal/journal"
@@ -32,13 +35,22 @@ import (
 	"github.com/gshepptech/interlock/internal/session"
 	"github.com/gshepptech/interlock/internal/shellscan"
 	"github.com/gshepptech/interlock/internal/territory"
+	"github.com/gshepptech/interlock/internal/verification"
 )
 
 const usage = `interlock - keep coding agents out of each other's way
 
   interlock hook <event> <agent>   run as an agent hook (reads payload on stdin)
   interlock status                 show territory and who holds what
-  interlock doctor                 check for the ways this silently fails
+  interlock cleanup [--dry-run]    remove state belonging to expired sessions
+  interlock cleanup --session ID --confirm ID
+                                   remove one expired session
+  interlock lease release ID --confirm ID
+                                   release one session's file holds
+  interlock handoff request|list|show|resolve
+                                   manage lightweight handoff requests
+  interlock doctor [--fix] [--smoke]
+                                   check, repair, and verify the installation
   interlock dashboard [--addr A]   serve a live view on 127.0.0.1 (default :7717)
   interlock init [--dry-run]       wire the hooks into each agent's settings
   interlock init --with-territory  also write a territory file, if you want rules
@@ -68,8 +80,14 @@ func main() {
 		os.Exit(runHook(args[1:]))
 	case "status":
 		os.Exit(runStatus())
+	case "cleanup":
+		os.Exit(runCleanup(args[1:]))
+	case "lease":
+		os.Exit(runLease(args[1:]))
+	case "handoff":
+		os.Exit(runHandoff(args[1:]))
 	case "doctor":
-		os.Exit(runDoctor())
+		os.Exit(runDoctor(args[1:]))
 	case "dashboard":
 		os.Exit(runDashboard(args[1:]))
 	case "init":
@@ -551,6 +569,28 @@ func runStatus() int {
 		}
 	}
 
+	now := time.Now()
+	sessionStore, err := session.Open(cfg.Root)
+	if err != nil {
+		fmt.Printf("\nsessions unavailable: %v\n", err)
+	} else if observed, err := sessionStore.All(); err != nil {
+		fmt.Printf("\ncannot read sessions: %v\n", err)
+	} else if len(observed) == 0 {
+		fmt.Println("\nno observed sessions")
+	} else {
+		fmt.Println("\nobserved sessions:")
+		for _, sess := range observed {
+			expires := sess.LastSeen.Add(session.IdleAfter)
+			expiry := "expires in " + formatDuration(expires.Sub(now))
+			if !expires.After(now) {
+				expiry = "expired " + formatDuration(now.Sub(expires)) + " ago"
+			}
+			fmt.Printf("  %s  %-7s %-6s last seen %s ago, %s\n",
+				sess.ID, fallback(sess.Agent, "unknown"),
+				sess.ObservationAt(now), formatDuration(now.Sub(sess.LastSeen)), expiry)
+		}
+	}
+
 	store, err := lease.Open(cfg.Root)
 	if err != nil {
 		fmt.Printf("\nleases unavailable: %v\n", err)
@@ -566,12 +606,340 @@ func runStatus() int {
 		fmt.Println("no shared files held right now")
 		return 0
 	}
-	now := time.Now()
 	fmt.Println("held right now:")
 	for _, l := range active {
-		fmt.Printf("  %s\n", l.Describe(now))
+		fmt.Printf("  %s Expires in %s.\n", l.Describe(now),
+			formatDuration(l.Remaining(now)))
 	}
 	return 0
+}
+
+func formatDuration(duration time.Duration) string {
+	if duration < 0 {
+		duration = 0
+	}
+	duration = duration.Round(time.Second)
+	if duration < time.Second {
+		return "now"
+	}
+	return duration.String()
+}
+
+func runCleanup(args []string) int {
+	dryRun := false
+	var sessionID, confirmation string
+	var dryRunSet, sessionSet, confirmationSet bool
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--dry-run", "-dry-run", "-n":
+			if dryRunSet {
+				fmt.Fprintln(os.Stderr, "--dry-run may be specified only once")
+				return exitUsage
+			}
+			dryRunSet = true
+			dryRun = true
+		case "--session":
+			if sessionSet || i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "--session needs an id")
+				return exitUsage
+			}
+			sessionSet = true
+			i++
+			sessionID = args[i]
+		case "--confirm":
+			if confirmationSet || i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "--confirm needs the exact session id")
+				return exitUsage
+			}
+			confirmationSet = true
+			i++
+			confirmation = args[i]
+		default:
+			fmt.Fprintf(os.Stderr, "unknown flag %q\n", args[i])
+			return exitUsage
+		}
+	}
+	if dryRun && sessionID != "" {
+		fmt.Fprintln(os.Stderr, "--dry-run cannot be combined with --session")
+		return exitUsage
+	}
+	if sessionSet != confirmationSet {
+		fmt.Fprintln(os.Stderr, "--session and --confirm must be provided together")
+		return exitUsage
+	}
+	if sessionSet && (sessionID == "" || confirmation == "") {
+		fmt.Fprintln(os.Stderr, "--session and --confirm values must not be empty")
+		return exitUsage
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot determine working directory: %v\n", err)
+		return 1
+	}
+	cfg, err := config.Load(cwd)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if sessionSet {
+		service, err := newControlService(cfg.Root)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		result, err := service.ClearStaleSession(
+			context.Background(), control.ActorCLI, sessionID, confirmation)
+		printControlResult(os.Stdout, os.Stderr, result)
+		if err != nil || !result.Successful() {
+			return 1
+		}
+		return 0
+	}
+	if !dryRun {
+		service, err := newControlService(cfg.Root)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		result, runErr := service.ClearAllStale(context.Background(), control.ActorCLI)
+		printControlResult(os.Stdout, os.Stderr, result)
+		if runErr != nil || !result.Successful() {
+			return 1
+		}
+		return 0
+	}
+	result, err := (cleanup.Service{Root: cfg.Root}).Run(true)
+	for _, item := range result.Sessions {
+		printCleanupResult(os.Stdout, item, dryRun)
+	}
+	if len(result.Sessions) == 0 {
+		fmt.Println("no stale sessions")
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cleanup: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func printCleanupResult(w io.Writer, item cleanup.SessionResult, dryRun bool) {
+	agent := fallback(item.Agent, "unknown agent")
+	if dryRun || item.Outcome == cleanup.Pending {
+		fmt.Fprintf(w, "would remove stale session %s (%s), last seen %s\n",
+			item.ID, agent, item.LastSeen.Format(time.RFC3339))
+		return
+	}
+	switch item.Outcome {
+	case cleanup.Removed:
+		fmt.Fprintf(w, "removed stale session %s (%s): %d leases, remedy=%t, pending=%t\n",
+			item.ID, agent, item.LeasesReleased, item.RemedyCleared, item.PendingRemoved)
+	case cleanup.Failed:
+		fmt.Fprintf(w, "failed to clean stale session %s (%s): %s\n",
+			item.ID, agent, fallback(item.Error, "unknown error"))
+	default:
+		fmt.Fprintf(w, "kept session %s (%s): it became active during cleanup\n",
+			item.ID, agent)
+	}
+}
+
+func runLease(args []string) int {
+	if len(args) < 2 || args[0] != "release" {
+		fmt.Fprintln(os.Stderr, "usage: interlock lease release ID --confirm ID")
+		return exitUsage
+	}
+	sessionID := args[1]
+	confirmation := ""
+	for i := 2; i < len(args); i++ {
+		if args[i] != "--confirm" || i+1 >= len(args) {
+			fmt.Fprintln(os.Stderr, "usage: interlock lease release ID --confirm ID")
+			return exitUsage
+		}
+		i++
+		confirmation = args[i]
+	}
+	root, err := currentRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	service, err := newControlService(root)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	result, runErr := service.ReleaseSessionLeases(
+		context.Background(), control.ActorCLI, sessionID, confirmation)
+	printControlResult(os.Stdout, os.Stderr, result)
+	if runErr != nil || !result.Successful() {
+		return 1
+	}
+	return 0
+}
+
+func runHandoff(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: interlock handoff request|list|show|resolve")
+		return exitUsage
+	}
+	root, err := currentRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	store := handoffrequest.Open(root)
+	switch args[0] {
+	case "list":
+		if len(args) != 1 {
+			return handoffUsage()
+		}
+		items, err := store.List()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "handoff list: %v\n", err)
+			return 1
+		}
+		if len(items) == 0 {
+			fmt.Println("no handoff requests")
+			return 0
+		}
+		for _, item := range items {
+			status := "open"
+			if !item.Open() {
+				status = "resolved"
+			}
+			fmt.Printf("%s  %-8s %s:%s  from %s\n", item.Request.ID, status,
+				item.Request.TargetKind, item.Request.Target, item.Request.SourceSession)
+		}
+		return 0
+	case "show":
+		if len(args) != 2 {
+			return handoffUsage()
+		}
+		item, err := store.Show(args[1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "handoff show: %v\n", err)
+			return 1
+		}
+		status := "open"
+		if !item.Open() {
+			status = "resolved"
+		}
+		fmt.Printf("id: %s\nstatus: %s\nfrom: %s\nto: %s:%s\nnote: %s\n",
+			item.Request.ID, status, item.Request.SourceSession,
+			item.Request.TargetKind, item.Request.Target, item.Request.Note)
+		return 0
+	case "request":
+		values, ok := parseNamedArgs(args[1:], map[string]bool{
+			"--from": true, "--target-kind": true, "--to": true, "--note": true,
+		})
+		if !ok {
+			return handoffUsage()
+		}
+		service, err := newControlService(root)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		result, runErr := service.RequestHandoff(context.Background(), control.ActorCLI,
+			handoffrequest.Create{
+				SourceSession: values["--from"],
+				TargetKind:    handoffrequest.TargetKind(values["--target-kind"]),
+				Target:        values["--to"], Note: values["--note"],
+			})
+		printControlResult(os.Stdout, os.Stderr, result)
+		if result.Handoff != nil {
+			fmt.Printf("request: %s\n", result.Handoff.Request.ID)
+		}
+		if runErr != nil || !result.Successful() {
+			return 1
+		}
+		return 0
+	case "resolve":
+		if len(args) < 2 {
+			return handoffUsage()
+		}
+		values, ok := parseNamedArgs(args[2:], map[string]bool{"--confirm": true})
+		if !ok {
+			return handoffUsage()
+		}
+		service, err := newControlService(root)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		result, runErr := service.ResolveHandoff(
+			context.Background(), control.ActorCLI, args[1], values["--confirm"])
+		printControlResult(os.Stdout, os.Stderr, result)
+		if runErr != nil || !result.Successful() {
+			return 1
+		}
+		return 0
+	default:
+		return handoffUsage()
+	}
+}
+
+func parseNamedArgs(args []string, allowed map[string]bool) (map[string]string, bool) {
+	values := map[string]string{}
+	for i := 0; i < len(args); i++ {
+		if !allowed[args[i]] || i+1 >= len(args) || values[args[i]] != "" {
+			return nil, false
+		}
+		name := args[i]
+		i++
+		values[name] = args[i]
+	}
+	for name := range allowed {
+		if values[name] == "" && name != "--note" {
+			return nil, false
+		}
+	}
+	return values, true
+}
+
+func handoffUsage() int {
+	fmt.Fprintln(os.Stderr, "usage: interlock handoff request --from ID --target-kind agent|team --to NAME --note TEXT")
+	fmt.Fprintln(os.Stderr, "       interlock handoff list | show ID | resolve ID --confirm ID")
+	return exitUsage
+}
+
+func printControlResult(out, errOut io.Writer, result control.Result) {
+	if result.Message != "" {
+		fmt.Fprintln(out, result.Message)
+	}
+	if result.Warning != "" {
+		fmt.Fprintln(errOut, "warning:", result.Warning)
+	}
+}
+
+func currentRoot() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine working directory: %w", err)
+	}
+	cfg, err := config.Load(cwd)
+	if err != nil {
+		return "", err
+	}
+	return cfg.Root, nil
+}
+
+func newControlService(root string) (control.Service, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return control.Service{}, fmt.Errorf("cannot determine my own path: %w", err)
+	}
+	codexFile, err := codexConfigPath()
+	if err != nil {
+		return control.Service{}, fmt.Errorf("cannot locate Codex config: %w", err)
+	}
+	return control.Service{Root: root, Executable: executable, CodexFile: codexFile}, nil
+}
+
+func fallback(value, otherwise string) string {
+	if value != "" {
+		return value
+	}
+	return otherwise
 }
 
 // runDashboard serves the live view.
@@ -598,9 +966,9 @@ func runDashboard(args []string) int {
 	if host, _, err := net.SplitHostPort(addr); err != nil {
 		fmt.Fprintf(os.Stderr, "cannot parse --addr %q: %v\n", addr, err)
 		return exitUsage
-	} else if !isLoopback(host) {
+	} else if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
 		fmt.Fprintf(os.Stderr,
-			"refusing to listen on %q: this page shows your development activity "+
+			"refusing to listen on %q: use an IP-literal loopback address; this page shows your development activity "+
 				"and is served on loopback only\n", host)
 		return exitUsage
 	}
@@ -612,33 +980,35 @@ func runDashboard(args []string) int {
 	}
 	// A repo with no declaration is the normal case, so the only thing worth
 	// failing on here is a declaration that exists and cannot be read.
-	if _, err := config.Load(cwd); err != nil {
+	cfg, err := config.Load(cwd)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
 
-	// State is re-read per request, so the page shows the repo as it is now and
-	// the server does not have to be restarted when the config changes.
-	load := func() (dashboard.View, error) {
-		cfg, err := config.Load(cwd)
-		if err != nil {
-			return dashboard.View{}, err
-		}
-		sessions, err := readSessions(cfg)
-		if err != nil {
-			return dashboard.View{}, err
-		}
-		leases, err := readLeases(cfg)
-		if err != nil {
-			return dashboard.View{}, err
-		}
-		return dashboard.Build(cfg, sessions, leases, readEvents(cfg), time.Now()), nil
+	// The repository boundary is fixed for the server lifetime. Runtime state is
+	// re-read per request, while config changes take effect after a restart.
+	load := dashboardLoad(cfg)
+	controller, err := newControlService(cfg.Root)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	controller.Config = cfg
+	handler, err := controlhttp.New(controller, addr, load)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
 	}
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           dashboard.Handler(load),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 * 1024,
 	}
 	fmt.Printf("interlock dashboard on http://%s\n", addr)
 	if err := srv.ListenAndServe(); err != nil {
@@ -648,12 +1018,30 @@ func runDashboard(args []string) int {
 	return 0
 }
 
+func dashboardLoad(cfg *config.Config) controlhttp.Load {
+	return func() (dashboard.View, []handoffrequest.Item, error) {
+		sessions, err := readSessions(cfg)
+		if err != nil {
+			return dashboard.View{}, nil, err
+		}
+		leases, err := readLeases(cfg)
+		if err != nil {
+			return dashboard.View{}, nil, err
+		}
+		requests, err := handoffrequest.Open(cfg.Root).List()
+		if err != nil {
+			return dashboard.View{}, nil, err
+		}
+		return dashboard.Build(cfg, sessions, leases, readEvents(cfg), time.Now()), requests, nil
+	}
+}
+
 func readSessions(cfg *config.Config) ([]*session.Session, error) {
 	store, err := session.Open(cfg.Root)
 	if err != nil {
 		return nil, err
 	}
-	return store.Active()
+	return store.All()
 }
 
 func readLeases(cfg *config.Config) ([]*lease.Lease, error) {
@@ -678,14 +1066,6 @@ func readEvents(cfg *config.Config) []journal.Entry {
 		return nil
 	}
 	return events
-}
-
-func isLoopback(host string) bool {
-	if host == "localhost" || host == "" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 const starterConfig = `{
@@ -756,38 +1136,24 @@ func runInit(args []string) int {
 		return 1
 	}
 
-	failed := false
-	for _, target := range install.Plan(cwd) {
-		change, err := install.Apply(target, exe, dryRun)
-		if err != nil {
-			// One agent's settings being unreadable must not stop the other from
-			// being wired up.
-			fmt.Fprintf(os.Stderr, "%s: %v\n", target.Agent, err)
-			failed = true
-			continue
-		}
+	codexFile, err := codexConfigPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot locate Codex config: %v\n", err)
+		return 1
+	}
+	repairs, repairErr := (diagnostic.Service{}).Repair(diagnostic.Options{
+		Root: cwd, Executable: exe, CodexFile: codexFile,
+	}, dryRun)
+	for _, repair := range repairs {
 		switch {
-		case !change.Changed():
-			fmt.Printf("%s: already wired up\n", target.Agent)
-		case dryRun:
-			fmt.Printf("%s: would add %s to %s\n",
-				target.Agent, strings.Join(change.Added, ", "), rel(cwd, change.File))
+		case repair.Changed:
+			fmt.Printf("%s: %s\n", repair.ID, repair.Detail)
 		default:
-			fmt.Printf("%s: added %s to %s\n",
-				target.Agent, strings.Join(change.Added, ", "), rel(cwd, change.File))
-			if change.Backup != "" {
-				fmt.Printf("%s: kept a copy of your settings at %s\n",
-					target.Agent, rel(cwd, change.Backup))
-			}
+			fmt.Printf("%s: already current\n", repair.ID)
 		}
 	}
-
-	if !dryRun {
-		if added, err := install.Gitignore(cwd, ".interlock/"); err != nil {
-			fmt.Fprintf(os.Stderr, "gitignore: %v\n", err)
-		} else if added {
-			fmt.Println("added .interlock/ to .gitignore, it is local runtime state")
-		}
+	if repairErr != nil {
+		fmt.Fprintf(os.Stderr, "init: %v\n", repairErr)
 	}
 
 	fmt.Printf(`
@@ -795,18 +1161,13 @@ That is it. Nothing to configure: open Claude in one terminal and Codex in
 another and they will see each other. Whoever writes a file first has it for a
 minute or two; the other is told who is in there and works on something else.
 
-One step cannot be done for you. Codex loads project hooks only from a trusted
-project and skips them silently otherwise, so add this to ~/.codex/config.toml:
-
-  [projects.%q]
-  trust_level = "trusted"
-
-Then run: interlock doctor, and interlock dashboard to watch them work.
+Run interlock doctor to confirm it is enforcing, and interlock dashboard to
+watch them work.
 
 If you ever need a hard rule the automatic behaviour cannot work out, such as
 one team owning a directory outright, run: interlock init --with-territory
-`, cwd)
-	if failed {
+`)
+	if repairErr != nil {
 		return 1
 	}
 	return 0
@@ -840,38 +1201,13 @@ func uninstallHooks(root string, dryRun bool) int {
 	return 0
 }
 
-// pendingDir holds the snapshot taken before a command whose targets could not
-// be read off the command line.
-func pendingDir(root string) string {
-	return filepath.Join(root, ".interlock", "pending")
-}
-
-func pendingFile(root, sessionID string) string {
-	sum := sha256.Sum256([]byte(sessionID))
-	return filepath.Join(pendingDir(root), hex.EncodeToString(sum[:16])+".json")
-}
-
 // armVerify snapshots the working tree so the next PostToolUse can tell what the
 // command actually wrote. It reports whether the tree can be watched at all.
 func armVerify(cfg *config.Config, sessionID string) bool {
 	if sessionID == "" {
 		return false
 	}
-	snap, err := gitstate.Take(cfg.Root)
-	if err != nil {
-		return false
-	}
-	enc, err := json.Marshal(snap)
-	if err != nil {
-		return false
-	}
-	if err := os.MkdirAll(pendingDir(cfg.Root), 0o755); err != nil {
-		return false
-	}
-	// Written directly rather than atomically: a torn snapshot fails to parse
-	// and the verification is skipped, which is the same outcome as not having
-	// armed it. Nothing downstream trusts a partial read.
-	return os.WriteFile(pendingFile(cfg.Root, sessionID), enc, 0o644) == nil
+	return verification.Open(cfg.Root).Arm(sessionID) == nil
 }
 
 // verifyAfter compares the tree against the snapshot armed before an opaque
@@ -883,18 +1219,9 @@ func verifyAfter(cfg *config.Config, team string, agent hookio.Agent, ev *hookio
 	if team == "" || ev.SessionID == "" {
 		return
 	}
-	file := pendingFile(cfg.Root, ev.SessionID)
-	raw, err := os.ReadFile(file)
+	before, err := verification.Open(cfg.Root).Consume(ev.SessionID)
 	if err != nil {
 		return // nothing was armed, which is the common case
-	}
-	// One snapshot answers one command. Removing it first means a failure below
-	// cannot leave it to be compared against some unrelated later command.
-	os.Remove(file)
-
-	var before gitstate.Snapshot
-	if err := json.Unmarshal(raw, &before); err != nil {
-		return
 	}
 	after, err := gitstate.Take(cfg.Root)
 	if err != nil {
@@ -902,7 +1229,7 @@ func verifyAfter(cfg *config.Config, team string, agent hookio.Agent, ev *hookio
 	}
 
 	var escaped []string
-	for _, path := range gitstate.Changed(&before, after) {
+	for _, path := range gitstate.Changed(before, after) {
 		// Our own runtime state changes constantly and is nobody's territory.
 		if strings.HasPrefix(path, ".interlock/") {
 			continue
@@ -970,83 +1297,74 @@ func record(cfg *config.Config, e journal.Entry) {
 // That is the failure mode worth building a command for: Codex skips project
 // hooks in an untrusted repo without saying anything, so a half-installed setup
 // looks exactly like a working one until two agents collide.
-func runDoctor() int {
-	cwd, err := os.Getwd()
+func runDoctor(args []string) int {
+	var fix, smoke bool
+	for _, arg := range args {
+		switch arg {
+		case "--fix", "-fix":
+			fix = true
+		case "--smoke", "-smoke":
+			smoke = true
+		default:
+			fmt.Fprintf(os.Stderr, "unknown flag %q\n", arg)
+			return exitUsage
+		}
+	}
+
+	root, err := currentRoot()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cannot determine working directory: %v\n", err)
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	service, err := newControlService(root)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 
+	var result control.Result
+	switch {
+	case fix:
+		result, err = service.RepairInstallation(
+			context.Background(), control.ActorCLI, "repair", smoke)
+		for _, repair := range result.Repairs {
+			mark := "ok  "
+			if repair.Changed {
+				mark = "FIX "
+			}
+			fmt.Printf("%s  %-28s %s\n", mark, repair.ID, repair.Detail)
+		}
+		fmt.Println()
+	case smoke:
+		result, err = service.VerifyInstallation(context.Background(), control.ActorCLI)
+	default:
+		result, err = service.CheckInstallation(context.Background())
+	}
+	if result.Warning != "" {
+		fmt.Fprintln(os.Stderr, "warning:", result.Warning)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doctor: %v\n", err)
+	}
+	if result.Diagnostic == nil {
+		return 1
+	}
+	report := *result.Diagnostic
 	problems := 0
-	report := func(ok bool, subject, detail string) {
+	for _, check := range report.Checks {
 		mark := "ok  "
-		if !ok {
+		switch check.Severity {
+		case diagnostic.Warn:
+			mark = "WARN"
+		case diagnostic.Fail:
 			mark = "FAIL"
 			problems++
 		}
-		fmt.Printf("%s  %-28s %s\n", mark, subject, detail)
-	}
-
-	cfg, err := config.Load(cwd)
-	if err != nil {
-		report(false, "config", err.Error())
-		return 1
-	}
-	if cfg.Declared {
-		report(true, "territory", fmt.Sprintf("%d teams declared in %s",
-			len(cfg.Map.Teams), config.FileName))
-		// A team nobody joins enforces nothing.
-		claimed := 0
-		for _, t := range cfg.Map.Teams {
-			if len(cfg.AgentsFor(t.Name)) > 0 {
-				claimed++
-			}
-		}
-		report(claimed > 0, "team assignment",
-			fmt.Sprintf("%d of %d teams have a default agent", claimed, len(cfg.Map.Teams)))
-	} else {
-		// Not a problem. This is how the tool is meant to be used.
-		report(true, "territory", "automatic, agents claim files as they write them")
-	}
-	report(true, "repo", cfg.Root)
-
-	for _, target := range install.Plan(cwd) {
-		wired, err := install.Installed(target)
-		switch {
-		case err != nil:
-			report(false, target.Agent+" hooks", err.Error())
-		case len(wired) == 0:
-			report(false, target.Agent+" hooks",
-				"not wired up. Run: interlock init")
-		case len(wired) < len(target.Events):
-			report(false, target.Agent+" hooks",
-				fmt.Sprintf("only %s wired, expected %d events",
-					strings.Join(wired, ", "), len(target.Events)))
-		default:
-			report(true, target.Agent+" hooks",
-				fmt.Sprintf("%d events in %s", len(wired), rel(cwd, target.File)))
-		}
-	}
-
-	// The silent one.
-	trusted, detail := codexTrusts(cwd)
-	report(trusted, "codex repo trust", detail)
-
-	if gitstate.Available(cwd) {
-		report(true, "after-the-fact checks", "git available, opaque writes are verified")
-	} else {
-		report(false, "after-the-fact checks",
-			"not a git repo, so writes from opaque shell commands cannot be checked")
-	}
-
-	if _, err := lease.Open(cfg.Root); err != nil {
-		report(false, "leases", err.Error())
-	} else {
-		report(true, "leases", "available")
+		fmt.Printf("%s  %-28s %s\n", mark, check.Subject, check.Detail)
 	}
 
 	fmt.Println()
-	if problems == 0 {
+	if problems == 0 && err == nil && result.Successful() {
 		fmt.Println("Everything is wired up.")
 		return 0
 	}
@@ -1055,30 +1373,12 @@ func runDoctor() int {
 	return 1
 }
 
-// codexTrusts reports whether Codex will load this repo's project hooks. Codex
-// skips them silently for an untrusted project, so this is checked by reading
-// its config rather than by waiting to find out.
-func codexTrusts(root string) (bool, string) {
+func codexConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return false, "cannot find your home directory to check ~/.codex/config.toml"
+		return "", err
 	}
-	file := filepath.Join(home, ".codex", "config.toml")
-	raw, err := os.ReadFile(file)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, "no ~/.codex/config.toml, so Codex is either not installed or not configured"
-	}
-	if err != nil {
-		return false, err.Error()
-	}
-	// Deliberately a substring check and not a TOML parse. Being wrong here
-	// costs a misleading line in a diagnostic; pulling in a TOML parser to be
-	// certain costs a dependency in a binary that has none.
-	if strings.Contains(string(raw), `"`+root+`"`) {
-		return true, "this repo is trusted, Codex will load its hooks"
-	}
-	return false, "this repo is NOT trusted, so Codex silently skips its hooks. " +
-		"Add [projects.\"" + root + "\"] trust_level = \"trusted\" to ~/.codex/config.toml"
+	return filepath.Join(home, ".codex", "config.toml"), nil
 }
 
 // allowedToRemedy reports whether this session was told to undo a change at this

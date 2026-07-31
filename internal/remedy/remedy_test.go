@@ -1,9 +1,14 @@
 package remedy
 
 import (
+	"errors"
+	"os"
 	"slices"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/gshepptech/interlock/internal/state"
 )
 
 func store(t *testing.T, clock *time.Time) *Store {
@@ -29,6 +34,75 @@ func TestAGrantedPathBecomesWritable(t *testing.T) {
 	}
 	if !s.Allowed("s1", "src/components/Widget.tsx") {
 		t.Error("the session cannot undo what it was told to undo")
+	}
+}
+
+func TestGrantWritesCurrentVersion(t *testing.T) {
+	now := time.Now()
+	s := store(t, &now)
+	if err := s.Grant("s1", []string{"a.go"}); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	g, err := s.read("s1")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if g.Version != state.CurrentVersion {
+		t.Errorf("version = %d, want %d", g.Version, state.CurrentVersion)
+	}
+}
+
+func TestConcurrentGrantsPreserveEveryPath(t *testing.T) {
+	now := time.Now()
+	s := store(t, &now)
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for _, path := range []string{"a.go", "b.go"} {
+		go func() {
+			ready.Done()
+			<-start
+			errs <- s.Grant("s1", []string{path})
+		}()
+	}
+	ready.Wait()
+	close(start)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("Grant: %v", err)
+		}
+	}
+	if got := s.Outstanding("s1"); !slices.Equal(got, []string{"a.go", "b.go"}) {
+		t.Fatalf("Outstanding = %v, want both concurrent grants", got)
+	}
+}
+
+func TestFutureGrantIsNeverChangedOrCleared(t *testing.T) {
+	now := time.Now()
+	s := store(t, &now)
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	file := s.pathFor("future")
+	original := []byte(`{"version":99,"session":"future","paths":{}}`)
+	if err := os.WriteFile(file, original, 0o644); err != nil {
+		t.Fatalf("seed future: %v", err)
+	}
+
+	for name, fn := range map[string]func() error{
+		"Grant": func() error { return s.Grant("future", []string{"a.go"}) },
+		"Clear": func() error { return s.Clear("future") },
+	} {
+		err := fn()
+		var unsupported *state.UnsupportedVersionError
+		if !errors.As(err, &unsupported) {
+			t.Errorf("%s error = %v, want UnsupportedVersionError", name, err)
+		}
+		got, readErr := os.ReadFile(file)
+		if readErr != nil || string(got) != string(original) {
+			t.Fatalf("%s changed future state: got=%q err=%v", name, got, readErr)
+		}
 	}
 }
 

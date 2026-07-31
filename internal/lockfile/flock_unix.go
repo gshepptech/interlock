@@ -8,6 +8,9 @@ import (
 	"syscall"
 )
 
+// Supported reports whether advisory locks are implemented on this platform.
+func Supported() bool { return true }
+
 // Acquire takes an exclusive advisory lock, blocking until it is available, and
 // returns the unlock function.
 //

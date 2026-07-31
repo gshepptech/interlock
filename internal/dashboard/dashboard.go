@@ -6,8 +6,10 @@
 // html/template, which escapes by default. Fetching a font or a script would also
 // mean a network call, and this tool reads someone's development activity.
 //
-// The page refreshes itself with a meta refresh rather than polling in script,
-// which keeps the whole thing inspectable in one file.
+// The page refreshes itself with a meta refresh and one tiny same-page script
+// that reloads when a backgrounded tab comes back into view. Background tabs can
+// throttle meta refreshes, and this is a live status panel; showing a stale
+// quiet state after an agent wakes up is worse than spending one local reload.
 package dashboard
 
 import (
@@ -48,18 +50,20 @@ type TeamView struct {
 }
 
 type SessionView struct {
+	ID       string
 	Agent    string
 	Team     string
 	Model    string
 	Started  string
 	LastSeen string
+	Expires  string
 	Recent   []TouchView
 	ShortID  string
 	// Aspect is the signal this agent is showing: proceeding, waiting, or
 	// stopped. It is the one piece of state a person scanning the page needs,
 	// so it is computed here rather than left to the template.
 	Aspect Aspect
-	// Areas are the directories this agent has been writing in. More useful at a
+	// Areas are the directories this agent recently wrote in. More useful at a
 	// glance than a file list: it says which part of the repo is busy.
 	Areas []string
 	// Latest is the last file written, kept alongside Areas because "which part
@@ -72,24 +76,29 @@ type SessionView struct {
 type Aspect string
 
 const (
-	// Proceeding: working, nothing in its way.
+	// Proceeding: seen very recently, nothing in its way.
 	Proceeding Aspect = "proceeding"
-	// Waiting: alive but quiet, most likely thinking.
+	// Waiting: alive but quiet, most likely thinking or parked.
 	Waiting Aspect = "waiting"
 	// Stopped: was refused a file within the last minute.
 	Stopped Aspect = "stopped"
+	// Ended: no hook event arrived before the observation expiry threshold.
+	Ended Aspect = "ended"
 )
 
-// Label is the plain word shown to a person. The railway vocabulary shapes how
-// the page looks; it does not get in the way of reading it.
+// Label is the plain word shown to a person. Interlock only sees hook events,
+// so the active state is deliberately phrased as recency, not certainty that an
+// agent is currently producing work.
 func (a Aspect) Label() string {
 	switch a {
 	case Stopped:
 		return "blocked"
 	case Waiting:
-		return "waiting"
+		return "quiet"
+	case Ended:
+		return "ended"
 	}
-	return "working"
+	return "recent"
 }
 
 type TouchView struct {
@@ -114,6 +123,7 @@ type LeaseView struct {
 	Team    string
 	Agent   string
 	Held    string
+	Expires string
 	ShortID string
 }
 
@@ -135,6 +145,7 @@ func Build(cfg *config.Config, sessions []*session.Session, leases []*lease.Leas
 			Team:    l.Team,
 			Agent:   l.Agent,
 			Held:    since(now, l.Acquired),
+			Expires: "in " + duration(l.Remaining(now)),
 			ShortID: short(l.SessionID),
 		})
 	}
@@ -154,24 +165,32 @@ func Build(cfg *config.Config, sessions []*session.Session, leases []*lease.Leas
 
 	activeByTeam := map[string]int{}
 	for _, s := range sessions {
-		activeByTeam[s.Team]++
+		if !s.Idle(now) {
+			activeByTeam[s.Team]++
+		}
 		sv := SessionView{
+			ID:       s.ID,
 			Agent:    s.Agent,
 			Team:     s.Team,
 			Model:    s.Model,
 			Started:  since(now, s.Started),
 			LastSeen: since(now, s.LastSeen),
+			Expires:  observationExpiry(now, s),
 			ShortID:  short(s.ID),
 			Holds:    holdsBySession[s.ID],
 			Aspect:   Proceeding,
 		}
-		switch {
-		case blockedRecently[s.ID]:
-			sv.Aspect = Stopped
-		case now.Sub(s.LastSeen) > 2*time.Minute:
-			// Quiet for a while is probably thinking, not gone. Worth showing
-			// differently so a stalled agent is visible.
+		switch s.ObservationAt(now) {
+		case session.Ended:
+			sv.Aspect = Ended
+		case session.Quiet:
+			// A recent hook means the session is alive, not necessarily working
+			// this second. Flip to quiet quickly so the panel does not overstate
+			// what Interlock can know.
 			sv.Aspect = Waiting
+		}
+		if sv.Aspect != Ended && blockedRecently[s.ID] {
+			sv.Aspect = Stopped
 		}
 
 		seen := map[string]bool{}
@@ -221,6 +240,10 @@ func Build(cfg *config.Config, sessions []*session.Session, leases []*lease.Leas
 			ev.Label = "got through, wrong territory"
 			ev.Escaped = true
 			v.Escaped++
+		case journal.ControlAction:
+			ev.Label = string(e.Action) + ": " + string(e.Result)
+			ev.Path = e.Target
+			ev.Agent = string(e.Actor)
 		}
 		v.Events = append(v.Events, ev)
 	}
@@ -250,7 +273,7 @@ func Handler(load func() (View, error)) http.Handler {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		// Nothing here should ever be cached: it is a live view.
 		w.Header().Set("Cache-Control", "no-store")
-		if err := page.Execute(w, view); err != nil {
+		if err := readOnlyPage.Execute(w, view); err != nil {
 			// The response is already partly written, so there is nothing useful
 			// to send. The next refresh will try again.
 			return
@@ -275,6 +298,21 @@ func since(now, then time.Time) string {
 	}
 }
 
+func observationExpiry(now time.Time, sess *session.Session) string {
+	expires := sess.LastSeen.Add(session.IdleAfter)
+	if !expires.After(now) {
+		return duration(now.Sub(expires)) + " ago"
+	}
+	return "in " + duration(expires.Sub(now))
+}
+
+func duration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	return since(time.Unix(0, d.Nanoseconds()), time.Unix(0, 0))
+}
+
 func short(id string) string {
 	if len(id) > 8 {
 		return id[:8]
@@ -284,7 +322,7 @@ func short(id string) string {
 
 // The page is built to look like a signalling panel, because an interlocking is
 // one. Files are track sections that are occupied or clear, and each agent shows
-// an aspect: green proceeding, amber waiting, red stopped. Those three colours
+// an aspect: green recent, amber quiet, red blocked, or grey ended. Those colours
 // are the railway's own system rather than decoration, which is why they are the
 // only colour on the page.
 //
@@ -295,7 +333,7 @@ func short(id string) string {
 // System fonts, because the page must fetch nothing: a vendored face would be
 // bytes to ship and a remote one would be a network call. The personality comes
 // from the treatment instead, letterspaced panel legends over tabular data.
-var page = template.Must(template.New("dashboard").Parse(`<!doctype html>
+var readOnlyPage = template.Must(template.New("dashboard").Parse(`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -303,6 +341,19 @@ var page = template.Must(template.New("dashboard").Parse(`<!doctype html>
 <meta http-equiv="refresh" content="{{.RefreshSecs}}">
 <title>Interlock</title>
 <link rel="icon" href="data:,">
+<script>
+(() => {
+  let hiddenAt = 0;
+  const remember = () => { if (document.hidden) hiddenAt = Date.now(); };
+  const catchUp = () => {
+    if (!document.hidden && hiddenAt && Date.now() - hiddenAt > 1000) {
+      location.reload();
+    }
+  };
+  document.addEventListener("visibilitychange", () => { remember(); catchUp(); });
+  window.addEventListener("focus", catchUp);
+})();
+</script>
 <style>
 :root {
   --panel:      #ffffff;
@@ -315,6 +366,7 @@ var page = template.Must(template.New("dashboard").Parse(`<!doctype html>
   --proceeding: #1c7a4b;
   --waiting:    #b57500;
   --stopped:    #bd1f2d;
+  --ended:      #8b959b;
   --occupied:   #14181b;
 }
 @media (prefers-color-scheme: dark) {
@@ -329,6 +381,7 @@ var page = template.Must(template.New("dashboard").Parse(`<!doctype html>
     --proceeding: #43b47c;
     --waiting:    #d99a2b;
     --stopped:    #e0616c;
+    --ended:      #6d787f;
     --occupied:   #e6ebee;
   }
 }
@@ -397,9 +450,11 @@ tr:last-child td { border-bottom: 0; }
 .proceeding { color: var(--proceeding); }
 .waiting    { color: var(--waiting); }
 .stopped    { color: var(--stopped); }
+.ended      { color: var(--ended); }
 .lamp.proceeding { background: var(--proceeding); }
 .lamp.waiting    { background: var(--waiting); }
 .lamp.stopped    { background: var(--stopped); }
+.lamp.ended      { background: var(--ended); }
 .aspect b { font-size: 12px; font-weight: 600; }
 
 .who { font-weight: 600; }
@@ -438,7 +493,7 @@ tr:last-child td { border-bottom: 0; }
 </header>
 
 <section class="indications">
-  <div class="ind"><b>{{len .Sessions}}</b><span>Agents</span></div>
+  <div class="ind"><b>{{len .Sessions}}</b><span>Sessions</span></div>
   <div class="ind"><b>{{len .Leases}}</b><span>Files held</span></div>
   <div class="ind"><b>{{.Prevented}}</b><span>Collisions stopped</span></div>
   <div class="ind{{if .Escaped}} alert{{end}}"><b>{{.Escaped}}</b><span>Got through</span></div>
@@ -451,8 +506,9 @@ tr:last-child td { border-bottom: 0; }
 <div class="scroll"><table>
   <tr>
     <th>State</th><th>Agent</th><th class="hide-narrow">Model</th>
-    <th>Working in</th><th class="num">Holds</th>
-    <th class="num">Last write</th><th class="num hide-narrow">Running</th>
+    <th>Recent areas</th><th class="num">Holds</th>
+    <th class="num">Last seen</th><th class="num hide-narrow">Expires</th>
+    <th class="num hide-narrow">Observed for</th>
   </tr>
   {{range .Sessions}}
   <tr>
@@ -468,6 +524,7 @@ tr:last-child td { border-bottom: 0; }
     </td>
     <td class="num">{{.Holds}}</td>
     <td class="num">{{.LastSeen}}</td>
+    <td class="num hide-narrow">{{.Expires}}</td>
     <td class="num hide-narrow">{{.Started}}</td>
   </tr>
   {{end}}
@@ -480,12 +537,13 @@ repository and they will appear.</p>
 <h2>Files held <em>claimed while an agent works on them, released when it moves on</em></h2>
 {{if .Leases}}
 <div class="scroll"><table>
-  <tr><th>Section</th><th>Held by</th><th class="num">For</th></tr>
+  <tr><th>Section</th><th>Held by</th><th class="num">For</th><th class="num">Expires</th></tr>
   {{range .Leases}}
   <tr>
     <td><span class="section mono">{{.Path}}</span></td>
     <td>{{.Agent}}{{if .Team}} <span class="meta">{{.Team}}</span>{{end}} <span class="meta mono">{{.ShortID}}</span></td>
     <td class="num">{{.Held}}</td>
+    <td class="num">{{.Expires}}</td>
   </tr>
   {{end}}
 </table></div>

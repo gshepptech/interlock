@@ -8,6 +8,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/gshepptech/interlock/internal/state"
 )
 
 func repo(t *testing.T) string {
@@ -58,6 +60,9 @@ func TestNewFileIsDetected(t *testing.T) {
 	before, err := Take(root)
 	if err != nil {
 		t.Fatalf("Take: %v", err)
+	}
+	if before.Version != state.CurrentVersion {
+		t.Errorf("snapshot version = %d, want %d", before.Version, state.CurrentVersion)
 	}
 	write(t, root, "src/api/users.go", "package api")
 	after, err := Take(root)

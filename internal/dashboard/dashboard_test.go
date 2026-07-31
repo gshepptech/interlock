@@ -73,15 +73,19 @@ func TestBuildCountsActiveSessionsAndHeldFilesPerTeam(t *testing.T) {
 }
 
 // The aspect is the one thing a person scanning the page reads, so each of the
-// three states has to come from something real.
+// states has to come from something real.
 func TestAspectReflectsWhatEachAgentIsDoing(t *testing.T) {
 	now := time.Now()
 	cfg := loadConfig(t, sample)
 
 	v := Build(cfg, []*session.Session{
 		{ID: "busy", Agent: "claude", Team: "backend", Started: now, LastSeen: now},
+		{ID: "recently-quiet", Agent: "codex", Team: "frontend", Started: now,
+			LastSeen: now.Add(-time.Minute)},
 		{ID: "quiet", Agent: "codex", Team: "frontend", Started: now,
 			LastSeen: now.Add(-5 * time.Minute)},
+		{ID: "ended", Agent: "claude", Team: "backend", Started: now,
+			LastSeen: now.Add(-session.IdleAfter - time.Minute)},
 		{ID: "hitwall", Agent: "codex", Team: "frontend", Started: now, LastSeen: now},
 	}, nil, []journal.Entry{
 		{At: now.Add(-10 * time.Second), Kind: journal.BlockedLease,
@@ -93,7 +97,10 @@ func TestAspectReflectsWhatEachAgentIsDoing(t *testing.T) {
 		byID[s.ShortID] = s
 	}
 	if got := byID["busy"].Aspect; got != Proceeding {
-		t.Errorf("a working session shows %q, want proceeding", got)
+		t.Errorf("a just-seen session shows %q, want proceeding", got)
+	}
+	if got := byID["recently"].Aspect; got != Waiting {
+		t.Errorf("a session quiet for one minute shows %q, want waiting", got)
 	}
 	if got := byID["quiet"].Aspect; got != Waiting {
 		t.Errorf("a session quiet for five minutes shows %q, want waiting", got)
@@ -101,9 +108,26 @@ func TestAspectReflectsWhatEachAgentIsDoing(t *testing.T) {
 	if got := byID["hitwall"].Aspect; got != Stopped {
 		t.Errorf("a session blocked ten seconds ago shows %q, want stopped", got)
 	}
+	if got := byID["ended"].Aspect; got != Ended {
+		t.Errorf("an expired observation shows %q, want ended", got)
+	}
 	// The words on the page stay plain, whatever the visual language is.
 	if got := Stopped.Label(); got != "blocked" {
 		t.Errorf("Stopped.Label() = %q, want the plain word", got)
+	}
+	if got := Proceeding.Label(); got != "recent" {
+		t.Errorf("Proceeding.Label() = %q, want recency rather than certainty", got)
+	}
+	if got := Waiting.Label(); got != "quiet" {
+		t.Errorf("Waiting.Label() = %q, want quiet rather than waiting", got)
+	}
+	if got := Ended.Label(); got != "ended" {
+		t.Errorf("Ended.Label() = %q, want ended", got)
+	}
+	if !strings.Contains(byID["busy"].Expires, "in ") ||
+		!strings.Contains(byID["ended"].Expires, "ago") {
+		t.Errorf("expiry labels are not explicit: busy=%q ended=%q",
+			byID["busy"].Expires, byID["ended"].Expires)
 	}
 }
 
@@ -206,11 +230,15 @@ func TestHandlerRendersTheState(t *testing.T) {
 			t.Errorf("page is missing %q", want)
 		}
 	}
-	// No script and no external fetch, so the page cannot phone home.
-	for _, forbidden := range []string{"<script", "http://", "https://", "//cdn"} {
+	// No external fetches, so the page cannot phone home. The inline script only
+	// catches a throttled background tab back up to current local state.
+	for _, forbidden := range []string{"src=", "href=\"http://", "http://", "https://", "//cdn", "fetch("} {
 		if strings.Contains(body, forbidden) {
-			t.Errorf("page contains %q, and it must be self-contained with no script", forbidden)
+			t.Errorf("page contains %q, and it must be self-contained with no external fetches", forbidden)
 		}
+	}
+	if !strings.Contains(body, "visibilitychange") {
+		t.Error("dashboard does not refresh when a backgrounded tab becomes visible")
 	}
 }
 

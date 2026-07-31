@@ -1,15 +1,24 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gshepptech/interlock/internal/cleanup"
+	"github.com/gshepptech/interlock/internal/config"
+	"github.com/gshepptech/interlock/internal/dashboard"
+	"github.com/gshepptech/interlock/internal/session"
 )
 
 // These tests run the real binary against real payloads in real repositories.
@@ -22,6 +31,25 @@ import (
 // reachable by testing a package in isolation, because neither was inside one.
 
 var binPath string
+
+func TestCleanupResultRenderingDistinguishesOutcomes(t *testing.T) {
+	for _, test := range []struct {
+		outcome cleanup.Outcome
+		want    string
+	}{
+		{cleanup.Removed, "removed stale session"},
+		{cleanup.SkippedActive, "kept session"},
+		{cleanup.Failed, "failed to clean stale session"},
+	} {
+		var out bytes.Buffer
+		printCleanupResult(&out, cleanup.SessionResult{
+			ID: "s1", Agent: "codex", Outcome: test.outcome, Error: "broken",
+		}, false)
+		if !strings.Contains(out.String(), test.want) {
+			t.Errorf("%s output = %q, want %q", test.outcome, out.String(), test.want)
+		}
+	}
+}
 
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "interlock-bin-*")
@@ -141,6 +169,7 @@ func cli(t *testing.T, dir string, args ...string) result {
 	t.Helper()
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "HOME="+dir)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -577,6 +606,153 @@ func TestInitThenDoctorAgreeOnWhatIsWired(t *testing.T) {
 	}
 }
 
+func TestDoctorFixRepairsAndIsIdempotent(t *testing.T) {
+	dir := repo(t, defaultConfig)
+
+	first := cli(t, dir, "doctor", "--fix")
+	if first.exit != 0 {
+		t.Fatalf("doctor --fix failed: stdout=%s stderr=%s", first.stdout, first.stderr)
+	}
+	if !strings.Contains(first.stdout, "FIX") ||
+		!strings.Contains(first.stdout, "Everything is wired up") {
+		t.Errorf("doctor --fix did not report repairs and final health:\n%s", first.stdout)
+	}
+
+	second := cli(t, dir, "doctor", "--fix")
+	if second.exit != 0 {
+		t.Fatalf("second doctor --fix failed: stdout=%s stderr=%s",
+			second.stdout, second.stderr)
+	}
+	if strings.Contains(second.stdout, "FIX") {
+		t.Errorf("second doctor --fix was not idempotent:\n%s", second.stdout)
+	}
+}
+
+func TestDoctorSmokeRunsInstalledCommandsAndLeavesNoSession(t *testing.T) {
+	dir := repo(t, defaultConfig)
+	if res := cli(t, dir, "init"); res.exit != 0 {
+		t.Fatalf("init failed: %s%s", res.stdout, res.stderr)
+	}
+
+	res := cli(t, dir, "doctor", "--smoke")
+	if res.exit != 0 {
+		t.Fatalf("doctor --smoke failed: stdout=%s stderr=%s", res.stdout, res.stderr)
+	}
+	for _, agent := range []string{"claude smoke", "codex smoke"} {
+		if !strings.Contains(res.stdout, agent) {
+			t.Errorf("smoke output missing %q:\n%s", agent, res.stdout)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, ".interlock", "sessions"))
+	if err != nil {
+		t.Fatalf("read smoke sessions: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			t.Errorf("smoke left session %s behind", entry.Name())
+		}
+	}
+}
+
+func TestDoctorFixRepairsHooksAfterBinaryMoves(t *testing.T) {
+	dir := repo(t, defaultConfig)
+	if res := cli(t, dir, "init"); res.exit != 0 {
+		t.Fatalf("init failed: %s%s", res.stdout, res.stderr)
+	}
+	oldPath := "/old/location/interlock"
+	for _, file := range []string{
+		filepath.Join(dir, ".claude", "settings.json"),
+		filepath.Join(dir, ".codex", "hooks.json"),
+	} {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		moved := strings.ReplaceAll(string(raw), binPath, oldPath)
+		if moved == string(raw) {
+			t.Fatalf("%s did not contain installed binary path", file)
+		}
+		if err := os.WriteFile(file, []byte(moved), 0o644); err != nil {
+			t.Fatalf("move path in %s: %v", file, err)
+		}
+	}
+
+	before := cli(t, dir, "doctor")
+	if before.exit == 0 || !strings.Contains(before.stdout, "stale") {
+		t.Fatalf("doctor did not detect moved binary: stdout=%s stderr=%s", before.stdout, before.stderr)
+	}
+	fixed := cli(t, dir, "doctor", "--fix")
+	if fixed.exit != 0 {
+		t.Fatalf("doctor --fix failed: stdout=%s stderr=%s", fixed.stdout, fixed.stderr)
+	}
+	for _, file := range []string{
+		filepath.Join(dir, ".claude", "settings.json"),
+		filepath.Join(dir, ".codex", "hooks.json"),
+	} {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read repaired %s: %v", file, err)
+		}
+		if strings.Contains(string(raw), oldPath) || !strings.Contains(string(raw), binPath) {
+			t.Fatalf("hook path was not repaired in %s:\n%s", file, raw)
+		}
+	}
+}
+
+func TestDashboardHTTPAcceptsLegacyAndCurrentStateButSkipsFutureState(t *testing.T) {
+	dir := bare(t)
+	store, _ := session.Open(dir)
+	for _, id := range []string{"legacy", "current", "future"} {
+		if err := store.Seen(id, "codex", "", "", dir); err != nil {
+			t.Fatalf("Seen %s: %v", id, err)
+		}
+	}
+	sessionDir := filepath.Join(dir, ".interlock", "sessions")
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		t.Fatalf("read sessions: %v", err)
+	}
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		file := filepath.Join(sessionDir, entry.Name())
+		raw, _ := os.ReadFile(file)
+		var doc map[string]any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		switch doc["id"] {
+		case "legacy":
+			delete(doc, "version")
+		case "future":
+			doc["version"] = float64(99)
+		}
+		raw, _ = json.Marshal(doc)
+		if err := os.WriteFile(file, raw, 0o644); err != nil {
+			t.Fatalf("write version fixture: %v", err)
+		}
+	}
+
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	sessions, err := readSessions(cfg)
+	if err != nil {
+		t.Fatalf("readSessions: %v", err)
+	}
+	view := dashboard.Build(cfg, sessions, nil, nil, time.Now())
+	recorder := httptest.NewRecorder()
+	dashboard.Handler(func() (dashboard.View, error) { return view, nil }).ServeHTTP(
+		recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK || !strings.Contains(body, "legacy") ||
+		!strings.Contains(body, "current") || strings.Contains(body, "future") {
+		t.Fatalf("dashboard version rendering code=%d body=%s", recorder.Code, body)
+	}
+}
+
 func TestDashboardRefusesANonLoopbackAddress(t *testing.T) {
 	dir := repo(t, defaultConfig)
 
@@ -589,16 +765,184 @@ func TestDashboardRefusesANonLoopbackAddress(t *testing.T) {
 	}
 }
 
+func TestDashboardLoaderPinsItsStartupRoot(t *testing.T) {
+	root := bare(t)
+	nested := filepath.Join(root, "src", "api")
+	cfg, err := config.Load(nested)
+	if err != nil {
+		t.Fatalf("initial config: %v", err)
+	}
+	load := dashboardLoad(cfg)
+	if err := os.WriteFile(filepath.Join(nested, config.FileName), []byte(`{"teams":{}}`), 0o644); err != nil {
+		t.Fatalf("write nearer config: %v", err)
+	}
+	reloaded, err := config.Load(nested)
+	if err != nil || reloaded.Root == cfg.Root {
+		t.Fatalf("fixture did not change config root: root=%q reloaded=%q err=%v", cfg.Root, reloaded.Root, err)
+	}
+	view, _, err := load()
+	if err != nil || view.Root != cfg.Root {
+		t.Fatalf("pinned load root=%q want=%q err=%v", view.Root, cfg.Root, err)
+	}
+}
+
 func TestStatusShowsTerritoryAndHeldFiles(t *testing.T) {
 	dir := repo(t, defaultConfig)
 	hook(t, dir, "PreToolUse", "claude",
 		write("s1", filepath.Join(dir, "src/types/api.ts")))
 
 	res := cli(t, dir, "status")
-	for _, want := range []string{"backend", "src/api/**", "src/types/api.ts"} {
+	for _, want := range []string{
+		"backend", "src/api/**", "src/types/api.ts", "recent", "Expires in",
+	} {
 		if !strings.Contains(res.stdout, want) {
 			t.Errorf("status missing %q:\n%s", want, res.stdout)
 		}
+	}
+}
+
+func TestCleanupDryRunThenRemovesExpiredSessionAndLease(t *testing.T) {
+	dir := bare(t)
+	path := filepath.Join(dir, "src/api/users.go")
+	if res := hook(t, dir, "PreToolUse", "claude", write("stale-session", path)); res.exit != 0 {
+		t.Fatalf("hook failed: %s", res.stderr)
+	}
+	sessionDir := filepath.Join(dir, ".interlock", "sessions")
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		t.Fatalf("read sessions: %v", err)
+	}
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		file := filepath.Join(sessionDir, entry.Name())
+		raw, _ := os.ReadFile(file)
+		var doc map[string]any
+		_ = json.Unmarshal(raw, &doc)
+		doc["last_seen"] = time.Now().Add(-session.IdleAfter - time.Minute)
+		raw, _ = json.Marshal(doc)
+		if err := os.WriteFile(file, raw, 0o644); err != nil {
+			t.Fatalf("age session: %v", err)
+		}
+	}
+
+	dry := cli(t, dir, "cleanup", "--dry-run")
+	if dry.exit != 0 || !strings.Contains(dry.stdout, "would remove stale session") {
+		t.Fatalf("cleanup dry-run: stdout=%s stderr=%s", dry.stdout, dry.stderr)
+	}
+	if status := cli(t, dir, "status"); !strings.Contains(status.stdout, "src/api/users.go") {
+		t.Fatal("dry-run removed the lease")
+	}
+
+	actual := cli(t, dir, "cleanup")
+	if actual.exit != 0 || !strings.Contains(actual.stdout, "removed stale session") {
+		t.Fatalf("cleanup: stdout=%s stderr=%s", actual.stdout, actual.stderr)
+	}
+	if status := cli(t, dir, "status"); strings.Contains(status.stdout, "src/api/users.go") {
+		t.Fatal("cleanup left the stale lease")
+	}
+}
+
+func TestCleanupRejectsUnpairedAndDuplicateTargetFlags(t *testing.T) {
+	dir := bare(t)
+	path := filepath.Join(dir, "src/api/users.go")
+	if res := hook(t, dir, "PreToolUse", "claude", write("stale-session", path)); res.exit != 0 {
+		t.Fatalf("hook failed: %s", res.stderr)
+	}
+	sessionDir := filepath.Join(dir, ".interlock", "sessions")
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		t.Fatalf("read sessions: %v", err)
+	}
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		file := filepath.Join(sessionDir, entry.Name())
+		raw, _ := os.ReadFile(file)
+		var doc map[string]any
+		_ = json.Unmarshal(raw, &doc)
+		doc["last_seen"] = time.Now().Add(-session.IdleAfter - time.Minute)
+		raw, _ = json.Marshal(doc)
+		if err := os.WriteFile(file, raw, 0o644); err != nil {
+			t.Fatalf("age session: %v", err)
+		}
+	}
+	for _, args := range [][]string{
+		{"cleanup", "--confirm", "stale-session"},
+		{"cleanup", "--session", "stale-session"},
+		{"cleanup", "--session", "", "--confirm", "stale-session"},
+		{"cleanup", "--session", "stale-session", "--confirm", ""},
+		{"cleanup", "--session", "", "--confirm", ""},
+		{"cleanup", "--session", "stale-session", "--session", "other", "--confirm", "stale-session"},
+		{"cleanup", "--session", "stale-session", "--confirm", "stale-session", "--confirm", "other"},
+	} {
+		result := cli(t, dir, args...)
+		if result.exit != exitUsage {
+			t.Fatalf("%v exit=%d stdout=%s stderr=%s", args, result.exit, result.stdout, result.stderr)
+		}
+		if status := cli(t, dir, "status"); !strings.Contains(status.stdout, "src/api/users.go") {
+			t.Fatalf("%v mutated state", args)
+		}
+	}
+}
+
+func TestLeaseReleaseCLIUsesConfirmedSharedControl(t *testing.T) {
+	dir := bare(t)
+	path := filepath.Join(dir, "src/api/users.go")
+	if res := hook(t, dir, "PreToolUse", "claude", write("release-session", path)); res.exit != 0 {
+		t.Fatalf("hook failed: %s", res.stderr)
+	}
+	wrong := cli(t, dir, "lease", "release", "release-session", "--confirm", "wrong")
+	if wrong.exit == 0 || !strings.Contains(wrong.stdout, "confirmation") {
+		t.Fatalf("wrong confirmation: stdout=%s stderr=%s", wrong.stdout, wrong.stderr)
+	}
+	if status := cli(t, dir, "status"); !strings.Contains(status.stdout, "src/api/users.go") {
+		t.Fatal("wrong confirmation released the lease")
+	}
+	released := cli(t, dir, "lease", "release", "release-session", "--confirm", "release-session")
+	if released.exit != 0 || !strings.Contains(released.stdout, "released 1 leases") {
+		t.Fatalf("release: stdout=%s stderr=%s", released.stdout, released.stderr)
+	}
+	if status := cli(t, dir, "status"); strings.Contains(status.stdout, "src/api/users.go") {
+		t.Fatal("confirmed release left the lease")
+	}
+}
+
+func TestHandoffRequestCLIIsVisibleDeduplicatedAndResolvable(t *testing.T) {
+	dir := bare(t)
+	args := []string{"handoff", "request", "--from", "s1", "--target-kind", "agent", "--to", "codex", "--note", "continue API work"}
+	created := cli(t, dir, args...)
+	if created.exit != 0 || !strings.Contains(created.stdout, "handoff request created") {
+		t.Fatalf("request: stdout=%s stderr=%s", created.stdout, created.stderr)
+	}
+	var id string
+	for line := range strings.SplitSeq(created.stdout, "\n") {
+		if strings.HasPrefix(line, "request: ") {
+			id = strings.TrimSpace(strings.TrimPrefix(line, "request: "))
+		}
+	}
+	if id == "" {
+		t.Fatalf("request id missing: %s", created.stdout)
+	}
+	duplicate := cli(t, dir, args...)
+	if duplicate.exit != 0 || !strings.Contains(duplicate.stdout, "already exists") ||
+		!strings.Contains(duplicate.stdout, id) {
+		t.Fatalf("duplicate: stdout=%s stderr=%s", duplicate.stdout, duplicate.stderr)
+	}
+	for _, command := range [][]string{{"handoff", "list"}, {"handoff", "show", id}} {
+		result := cli(t, dir, command...)
+		if result.exit != 0 || !strings.Contains(result.stdout, id) {
+			t.Fatalf("%v: stdout=%s stderr=%s", command, result.stdout, result.stderr)
+		}
+	}
+	resolved := cli(t, dir, "handoff", "resolve", id, "--confirm", id)
+	if resolved.exit != 0 || !strings.Contains(resolved.stdout, "resolved") {
+		t.Fatalf("resolve: stdout=%s stderr=%s", resolved.stdout, resolved.stderr)
+	}
+	if shown := cli(t, dir, "handoff", "show", id); !strings.Contains(shown.stdout, "status: resolved") {
+		t.Fatalf("resolved show: %s%s", shown.stdout, shown.stderr)
 	}
 }
 
@@ -649,7 +993,7 @@ func TestInstalledConfigActuallyFiresForEveryWritingTool(t *testing.T) {
 					continue
 				}
 				for _, h := range group.Hooks {
-					if strings.Contains(h.Command, "interlock hook") {
+					if strings.Contains(h.Command, " hook "+event+" claude") {
 						fired = true
 					}
 				}

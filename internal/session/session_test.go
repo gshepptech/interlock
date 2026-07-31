@@ -1,8 +1,15 @@
 package session
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/gshepptech/interlock/internal/state"
 )
 
 func store(t *testing.T, clock *time.Time) *Store {
@@ -221,5 +228,134 @@ func TestSeenRequiresASessionID(t *testing.T) {
 
 	if err := s.Seen("", "claude", "backend", "", "/repo"); err == nil {
 		t.Error("Seen accepted an empty session id")
+	}
+}
+
+func TestOpenDoesNotCreateState(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Open(root); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := os.Stat(root + "/.interlock"); !os.IsNotExist(err) {
+		t.Errorf("Open mutated the repository: %v", err)
+	}
+}
+
+func TestSessionWritesCurrentVersionAndUpgradesLegacy(t *testing.T) {
+	now := time.Now()
+	s := store(t, &now)
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	legacy := map[string]any{
+		"id": "legacy", "agent": "claude", "started": now, "last_seen": now,
+	}
+	raw, _ := json.Marshal(legacy)
+	if err := os.WriteFile(s.pathFor("legacy"), raw, 0o644); err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+
+	if err := s.Seen("legacy", "claude", "", "", "/repo"); err != nil {
+		t.Fatalf("Seen legacy: %v", err)
+	}
+	got, err := s.read("legacy")
+	if err != nil {
+		t.Fatalf("read upgraded: %v", err)
+	}
+	if got.Version != state.CurrentVersion {
+		t.Errorf("version = %d, want %d", got.Version, state.CurrentVersion)
+	}
+}
+
+func TestFutureSessionIsNeverOverwrittenOrEnded(t *testing.T) {
+	now := time.Now()
+	s := store(t, &now)
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	file := s.pathFor("future")
+	original := []byte(`{"version":99,"id":"future","agent":"codex"}`)
+	if err := os.WriteFile(file, original, 0o644); err != nil {
+		t.Fatalf("seed future: %v", err)
+	}
+
+	for name, fn := range map[string]func() error{
+		"Seen":    func() error { return s.Seen("future", "codex", "", "", "/repo") },
+		"Touched": func() error { return s.Touched("future", "Write", []string{"a.go"}) },
+		"End":     func() error { return s.End("future") },
+	} {
+		err := fn()
+		var unsupported *state.UnsupportedVersionError
+		if !errors.As(err, &unsupported) {
+			t.Errorf("%s error = %v, want UnsupportedVersionError", name, err)
+		}
+		got, readErr := os.ReadFile(file)
+		if readErr != nil || string(got) != string(original) {
+			t.Fatalf("%s changed future state: got=%q err=%v", name, got, readErr)
+		}
+	}
+}
+
+func TestCleanupStaleRechecksLivenessUnderTheSessionLock(t *testing.T) {
+	now := time.Now()
+	s := store(t, &now)
+	if err := s.Seen("s1", "claude", "", "", "/repo"); err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	now = now.Add(IdleAfter + time.Minute)
+	stale, err := s.Stale(now.Add(-IdleAfter))
+	if err != nil || len(stale) != 1 {
+		t.Fatalf("Stale = %+v err=%v", stale, err)
+	}
+
+	// The session resumes after enumeration but before cleanup acquires its lock.
+	if err := s.Seen("s1", "claude", "", "", "/repo"); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	cleaned := false
+	_, removed, err := s.CleanupStale("s1", now.Add(-IdleAfter), func() error {
+		cleaned = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("CleanupStale: %v", err)
+	}
+	if removed || cleaned {
+		t.Fatal("cleanup removed artifacts for a session that resumed")
+	}
+	if _, err := s.Get("s1"); err != nil {
+		t.Errorf("resumed session was removed: %v", err)
+	}
+}
+
+func TestObservationAtUsesSharedRecencyAndExpiryThresholds(t *testing.T) {
+	now := time.Now()
+	sess := &Session{LastSeen: now}
+	if got := sess.ObservationAt(now); got != Recent {
+		t.Errorf("now = %q, want recent", got)
+	}
+	if got := sess.ObservationAt(now.Add(RecentAfter + time.Second)); got != Quiet {
+		t.Errorf("after recent window = %q, want quiet", got)
+	}
+	if got := sess.ObservationAt(now.Add(IdleAfter + time.Second)); got != Ended {
+		t.Errorf("after idle window = %q, want ended", got)
+	}
+}
+
+func TestSessionLocksUseABoundedShardSet(t *testing.T) {
+	now := time.Now()
+	s := store(t, &now)
+	for i := range 256 {
+		id := fmt.Sprintf("session-%d", i)
+		if err := s.Seen(id, "codex", "", "", "/repo"); err != nil {
+			t.Fatalf("Seen %s: %v", id, err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(s.dir, ".locks"))
+	if err != nil {
+		t.Fatalf("read locks: %v", err)
+	}
+	if len(entries) > 64 {
+		t.Fatalf("created %d lock files, want at most 64", len(entries))
 	}
 }

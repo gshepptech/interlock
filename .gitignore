@@ -1,2 +1,9 @@
 bin/
 .agentcoord/
+.interlock/
+.playwright-cli/
+
+# Interlock installs its own hooks here when dogfooding. They carry absolute
+# paths to the local binary, so they are machine-specific and not shareable.
+.claude/
+.codex/

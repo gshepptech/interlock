@@ -22,7 +22,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
+
+	"github.com/gshepptech/interlock/internal/lockfile"
+	"github.com/gshepptech/interlock/internal/state"
 )
 
 // TTL is how long a grant lasts. Long enough for an agent to finish its turn and
@@ -31,6 +35,7 @@ const TTL = 15 * time.Minute
 
 // grant is one session's outstanding permissions.
 type grant struct {
+	Version int                  `json:"version"`
 	Paths   map[string]time.Time `json:"paths"`
 	Session string               `json:"session"`
 }
@@ -47,9 +52,6 @@ func Open(root string) (*Store, error) { return open(root, TTL, time.Now) }
 
 func open(root string, ttl time.Duration, now func() time.Time) (*Store, error) {
 	dir := filepath.Join(root, ".interlock", "remedy")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create remedy dir: %w", err)
-	}
 	return &Store{dir: dir, ttl: ttl, now: now}, nil
 }
 
@@ -62,9 +64,17 @@ func (s *Store) Grant(sessionID string, paths []string) error {
 	if sessionID == "" || len(paths) == 0 {
 		return nil
 	}
-	g, err := s.read(sessionID)
+	unlock, err := s.lock(sessionID)
 	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	g, err := s.read(sessionID)
+	if errors.Is(err, os.ErrNotExist) {
 		g = &grant{Session: sessionID, Paths: map[string]time.Time{}}
+	} else if err != nil {
+		return err
 	}
 	for _, p := range paths {
 		g.Paths[p] = s.now()
@@ -92,14 +102,31 @@ func (s *Store) Allowed(sessionID, path string) bool {
 
 // Clear drops a session's grants, on a tidy exit.
 func (s *Store) Clear(sessionID string) error {
+	_, err := s.ClearResult(sessionID)
+	return err
+}
+
+// ClearResult drops a session's grants and reports whether a file was removed.
+func (s *Store) ClearResult(sessionID string) (bool, error) {
 	if sessionID == "" {
-		return nil
+		return false, nil
 	}
-	err := os.Remove(s.pathFor(sessionID))
+	unlock, err := s.lock(sessionID)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+
+	if _, err := s.read(sessionID); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	err = os.Remove(s.pathFor(sessionID))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("clear remedy: %w", err)
+		return false, fmt.Errorf("clear remedy: %w", err)
 	}
-	return nil
+	return err == nil, nil
 }
 
 // Outstanding lists the paths a session still owes a fix on, sorted. This is
@@ -119,8 +146,34 @@ func (s *Store) Outstanding(sessionID string) []string {
 	return out
 }
 
+// Inspect scans persisted remedy grants without mutating them.
+func (s *Store) Inspect() ([]state.Issue, error) {
+	entries, err := os.ReadDir(s.dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read remedy dir: %w", err)
+	}
+	var issues []state.Issue
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(s.dir, entry.Name())
+		if _, err := readGrant(path); err != nil {
+			issues = append(issues, state.Issue{Store: "remedy", Path: path, Err: err})
+		}
+	}
+	return issues, nil
+}
+
 func (s *Store) read(sessionID string) (*grant, error) {
-	raw, err := os.ReadFile(s.pathFor(sessionID))
+	return readGrant(s.pathFor(sessionID))
+}
+
+func readGrant(file string) (*grant, error) {
+	raw, err := os.ReadFile(file)
 	if err != nil {
 		return nil, err
 	}
@@ -131,10 +184,17 @@ func (s *Store) read(sessionID string) (*grant, error) {
 	if g.Paths == nil {
 		g.Paths = map[string]time.Time{}
 	}
+	if err := state.Validate("remedy", file, g.Version); err != nil {
+		return nil, err
+	}
 	return &g, nil
 }
 
 func (s *Store) write(g *grant) error {
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return fmt.Errorf("create remedy dir: %w", err)
+	}
+	g.Version = state.CurrentVersion
 	enc, err := json.Marshal(g)
 	if err != nil {
 		return fmt.Errorf("encode remedy grant: %w", err)
@@ -162,4 +222,12 @@ func (s *Store) write(g *grant) error {
 func (s *Store) pathFor(sessionID string) string {
 	sum := sha256.Sum256([]byte(sessionID))
 	return filepath.Join(s.dir, hex.EncodeToString(sum[:16])+".json")
+}
+
+func (s *Store) lock(sessionID string) (func(), error) {
+	unlock, err := lockfile.AcquireKeyed(filepath.Join(s.dir, ".locks"), sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("lock remedy grant: %w", err)
+	}
+	return unlock, nil
 }

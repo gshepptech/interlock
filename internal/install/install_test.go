@@ -139,8 +139,9 @@ func TestApplyIsIdempotent(t *testing.T) {
 	}
 }
 
-// Moving the binary must not orphan the entries and cause a duplicate install.
-func TestApplyRecognisesItsOwnEntryAfterTheBinaryMoves(t *testing.T) {
+// Moving the binary must update our entries in place rather than duplicate them
+// or leave hooks pointing at an executable that no longer exists.
+func TestApplyRepairsItsOwnEntryAfterTheBinaryMoves(t *testing.T) {
 	root := t.TempDir()
 	target := claudeTarget(root)
 
@@ -151,8 +152,12 @@ func TestApplyRecognisesItsOwnEntryAfterTheBinaryMoves(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply after move: %v", err)
 	}
-	if again.Changed() {
-		t.Errorf("reinstalled after the binary moved: %v", again.Added)
+	if len(again.Added) != 0 || len(again.Updated) != len(target.Events) {
+		t.Errorf("change = %#v, want every event updated in place", again)
+	}
+	hooks := readDoc(t, target.File)["hooks"].(map[string]any)
+	if got := len(hooks["PreToolUse"].([]any)); got != 1 {
+		t.Errorf("PreToolUse has %d entries after repair, want 1", got)
 	}
 }
 
@@ -272,6 +277,195 @@ func TestCodexPlanHasNoSessionEnd(t *testing.T) {
 	}
 }
 
+func codexTarget(root string) Target {
+	for _, t := range Plan(root) {
+		if t.Agent == "codex" {
+			return t
+		}
+	}
+	panic("no codex target in the plan")
+}
+
+func TestCodexTrustEntriesMatchCodexHashes(t *testing.T) {
+	root := t.TempDir()
+	target := codexTarget(root)
+	if _, err := Apply(target, "/bin/interlock", false); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	entries, err := CodexTrustEntries(target)
+	if err != nil {
+		t.Fatalf("CodexTrustEntries: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("got %d trust entries, want 3: %#v", len(entries), entries)
+	}
+
+	want := map[string]string{
+		filepath.Join(root, ".codex/hooks.json") + ":post_tool_use:0:0": "sha256:160d0dff29043324eef8866a02980ad110ab4c2808aa3a8a29cb5a31931d0194",
+		filepath.Join(root, ".codex/hooks.json") + ":pre_tool_use:0:0":  "sha256:fc0f71122a7e2dbe3075864c08553237b9c72492d8d708e7f6f2bc331c17093a",
+		filepath.Join(root, ".codex/hooks.json") + ":session_start:0:0": "sha256:e3368389ca4edc0595af81ccd00c0f1b32774c7d4cd89cc549ba725025d2aaee",
+	}
+	for _, entry := range entries {
+		if want[entry.Key] != entry.Hash {
+			t.Errorf("%s hash = %q, want %q", entry.Key, entry.Hash, want[entry.Key])
+		}
+		delete(want, entry.Key)
+	}
+	for key := range want {
+		t.Errorf("missing trust entry %s", key)
+	}
+}
+
+func TestTrustCodexConfigAddsRepoAndHookTrust(t *testing.T) {
+	root := t.TempDir()
+	target := codexTarget(root)
+	if _, err := Apply(target, "/bin/interlock", false); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	entries, err := CodexTrustEntries(target)
+	if err != nil {
+		t.Fatalf("CodexTrustEntries: %v", err)
+	}
+
+	file := filepath.Join(t.TempDir(), ".codex", "config.toml")
+	change, err := TrustCodexConfig(file, root, entries, false)
+	if err != nil {
+		t.Fatalf("TrustCodexConfig: %v", err)
+	}
+	if !change.ProjectTrusted {
+		t.Error("project trust was not reported")
+	}
+	if len(change.HooksTrusted) != len(entries) {
+		t.Errorf("trusted %d hooks, want %d", len(change.HooksTrusted), len(entries))
+	}
+	ok, detail := CodexTrustStatus(file, root, entries)
+	if !ok {
+		t.Fatalf("CodexTrustStatus failed: %s", detail)
+	}
+
+	again, err := TrustCodexConfig(file, root, entries, false)
+	if err != nil {
+		t.Fatalf("second TrustCodexConfig: %v", err)
+	}
+	if again.Changed() {
+		t.Errorf("second TrustCodexConfig changed config: %#v", again)
+	}
+}
+
+func TestTrustCodexConfigUpdatesStaleHookHash(t *testing.T) {
+	root := t.TempDir()
+	target := codexTarget(root)
+	if _, err := Apply(target, "/bin/interlock", false); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	entries, err := CodexTrustEntries(target)
+	if err != nil {
+		t.Fatalf("CodexTrustEntries: %v", err)
+	}
+	file := filepath.Join(t.TempDir(), "config.toml")
+	header := `[hooks.state."` + entries[0].Key + `"]`
+	if err := os.WriteFile(file, []byte(header+"\ntrusted_hash = \"sha256:old\"\n"), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	change, err := TrustCodexConfig(file, root, entries[:1], false)
+	if err != nil {
+		t.Fatalf("TrustCodexConfig: %v", err)
+	}
+	if len(change.HooksUpdated) != 1 {
+		t.Fatalf("updated %d hooks, want 1: %#v", len(change.HooksUpdated), change)
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if strings.Contains(string(raw), "sha256:old") {
+		t.Errorf("stale hash still present:\n%s", raw)
+	}
+}
+
+func TestTrustCodexConfigIgnoresTableTextInsideMultilineString(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.toml")
+	root := "/repo"
+	original := "note = '''\n[projects.\"/repo\"]\ntrust_level = \"trusted\"\n'''\n"
+	if err := os.WriteFile(file, []byte(original), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	status := InspectCodexProjectTrust(file, root)
+	if status.State != TrustMissing {
+		t.Fatalf("fake table state = %s, want missing: %s", status.State, status.Detail)
+	}
+	if _, err := TrustCodexConfig(file, root, nil, false); err != nil {
+		t.Fatalf("TrustCodexConfig: %v", err)
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(raw), original) {
+		t.Fatalf("multiline value was not preserved:\n%s", raw)
+	}
+	if status = InspectCodexProjectTrust(file, root); status.State != TrustHealthy {
+		t.Fatalf("repaired state = %s: %s", status.State, status.Detail)
+	}
+}
+
+func TestTrustCodexConfigUpdatesEquivalentDottedKeysSemantically(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.toml")
+	root := "/repo"
+	entry := CodexTrustEntry{Key: "/repo/.codex/hooks.json:session_start:0:0", Hash: "sha256:new"}
+	body := "projects.\"/repo\".trust_level = \"untrusted\"\n" +
+		"hooks.state.\"" + entry.Key + "\".trusted_hash = \"sha256:old\"\n"
+	if err := os.WriteFile(file, []byte(body), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	change, err := TrustCodexConfig(file, root, []CodexTrustEntry{entry}, false)
+	if err != nil {
+		t.Fatalf("TrustCodexConfig: %v", err)
+	}
+	if !change.ProjectTrusted || len(change.HooksUpdated) != 1 {
+		t.Fatalf("change = %#v", change)
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Count(string(raw), "trust_level") != 1 || strings.Count(string(raw), "trusted_hash") != 1 {
+		t.Fatalf("semantic keys were duplicated:\n%s", raw)
+	}
+	if ok, detail := CodexTrustStatus(file, root, []CodexTrustEntry{entry}); !ok {
+		t.Fatalf("generated TOML failed semantic verification: %s\n%s", detail, raw)
+	}
+}
+
+func TestInspectCodexTrustMarksMalformedAndSymlinkUnrepairable(t *testing.T) {
+	dir := t.TempDir()
+	malformed := filepath.Join(dir, "malformed.toml")
+	if err := os.WriteFile(malformed, []byte("[broken"), 0o644); err != nil {
+		t.Fatalf("seed malformed: %v", err)
+	}
+	status := InspectCodexProjectTrust(malformed, "/repo")
+	if status.State != TrustMalformed || status.Repairable() {
+		t.Fatalf("malformed status = %#v", status)
+	}
+
+	real := filepath.Join(dir, "real.toml")
+	link := filepath.Join(dir, "link.toml")
+	if err := os.WriteFile(real, []byte(""), 0o644); err != nil {
+		t.Fatalf("seed real: %v", err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	status = InspectCodexProjectTrust(link, "/repo")
+	if status.State != TrustMalformed || status.Repairable() {
+		t.Fatalf("symlink status = %#v", status)
+	}
+}
+
 func TestGitignoreAddsOnceAndOnlyOnce(t *testing.T) {
 	root := t.TempDir()
 
@@ -316,6 +510,181 @@ func TestGitignoreAppendsSafelyToAFileWithoutATrailingNewline(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "node_modules\n") {
 		t.Errorf("existing entry was mangled: %q", raw)
+	}
+}
+
+func TestInspectReportsMissingStaleAndHealthy(t *testing.T) {
+	root := t.TempDir()
+	target := claudeTarget(root)
+
+	missing, err := Inspect(target, "/new/interlock")
+	if err != nil {
+		t.Fatalf("Inspect missing: %v", err)
+	}
+	for _, event := range missing.Events {
+		if event.State != Missing {
+			t.Errorf("fresh %s state = %s, want missing", event.Event, event.State)
+		}
+	}
+
+	if _, err := Apply(target, "/old/interlock", false); err != nil {
+		t.Fatalf("Apply old: %v", err)
+	}
+	stale, err := Inspect(target, "/new/interlock")
+	if err != nil {
+		t.Fatalf("Inspect stale: %v", err)
+	}
+	for _, event := range stale.Events {
+		if event.State != Stale {
+			t.Errorf("old %s state = %s, want stale", event.Event, event.State)
+		}
+	}
+
+	if _, err := Apply(target, "/new/interlock", false); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	healthy, err := Inspect(target, "/new/interlock")
+	if err != nil {
+		t.Fatalf("Inspect healthy: %v", err)
+	}
+	for _, event := range healthy.Events {
+		if event.State != Healthy {
+			t.Errorf("repaired %s state = %s (%s)",
+				event.Event, event.State, event.Detail)
+		}
+	}
+}
+
+func TestCommandsQuoteExecutablePathsWithWhitespaceAndQuotes(t *testing.T) {
+	root := t.TempDir()
+	target := claudeTarget(root)
+	exe := filepath.Join(root, "it's tools", "interlock")
+	if _, err := Apply(target, exe, false); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	status, err := Inspect(target, exe)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	for _, event := range status.Events {
+		if event.State != Healthy {
+			t.Errorf("%s state = %s (%s)", event.Event, event.State, event.Detail)
+		}
+	}
+	raw, err := os.ReadFile(target.File)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(raw), managedMarker) {
+		t.Errorf("installed command lacks ownership marker: %s", raw)
+	}
+}
+
+func TestApplyRefusesMixedOwnedAndUserHandlers(t *testing.T) {
+	root := t.TempDir()
+	target := claudeTarget(root)
+	if err := os.MkdirAll(filepath.Dir(target.File), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	group := map[string]any{
+		"matcher": claudeWriteTools,
+		"hooks": []any{
+			map[string]any{
+				"type":    "command",
+				"command": hookCommand("/bin/interlock", "PreToolUse", "claude"),
+			},
+			map[string]any{"type": "command", "command": "my-own-guard"},
+		},
+	}
+	doc := map[string]any{"hooks": map[string]any{"PreToolUse": []any{group}}}
+	original, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(target.File, original, 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if _, err := Apply(target, "/bin/interlock", false); err == nil {
+		t.Fatal("Apply repaired a mixed group")
+	}
+	raw, err := os.ReadFile(target.File)
+	if err != nil || string(raw) != string(original) {
+		t.Fatalf("mixed group changed: %s err=%v", raw, err)
+	}
+}
+
+func TestTrustCodexConfigRefusesMalformedTOML(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.toml")
+	original := []byte("[projects.\"broken\"\ntrust_level =")
+	if err := os.WriteFile(file, original, 0o640); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := TrustCodexConfig(file, "/repo", nil, false); err == nil {
+		t.Fatal("TrustCodexConfig accepted malformed TOML")
+	}
+	raw, _ := os.ReadFile(file)
+	if string(raw) != string(original) {
+		t.Fatalf("malformed TOML changed: %q", raw)
+	}
+}
+
+func TestSafeWritesPreserveModesAndRefuseSymlinks(t *testing.T) {
+	root := t.TempDir()
+	target := claudeTarget(root)
+	if err := os.MkdirAll(filepath.Dir(target.File), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(target.File, []byte("{\"model\":\"opus\"}"), 0o640); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := Apply(target, "/bin/interlock", false); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	info, err := os.Stat(target.File)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Errorf("mode = %o, want 640", info.Mode().Perm())
+	}
+
+	symlinkRoot := t.TempDir()
+	real := filepath.Join(symlinkRoot, "real.json")
+	if err := os.WriteFile(real, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write real: %v", err)
+	}
+	symlinkTarget := claudeTarget(symlinkRoot)
+	if err := os.MkdirAll(filepath.Dir(symlinkTarget.File), 0o755); err != nil {
+		t.Fatalf("mkdir symlink target: %v", err)
+	}
+	if err := os.Symlink(real, symlinkTarget.File); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, err := Apply(symlinkTarget, "/bin/interlock", false); err == nil {
+		t.Fatal("Apply followed a settings symlink")
+	}
+}
+
+func TestWriteExpectedDetectsObservedConcurrentEdit(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(file, []byte("before"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	original, err := readSnapshot(file)
+	if err != nil {
+		t.Fatalf("readSnapshot: %v", err)
+	}
+	if err := os.WriteFile(file, []byte("user edit"), 0o644); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	err = writeExpected(file, []byte("interlock edit"), original)
+	if err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("writeExpected error = %v, want detected change", err)
+	}
+	raw, _ := os.ReadFile(file)
+	if string(raw) != "user edit" {
+		t.Fatalf("user edit was overwritten: %q", raw)
 	}
 }
 

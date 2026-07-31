@@ -6,3 +6,6 @@ package lockfile
 // no-op: a silent no-op would make every caller race.
 
 func Acquire(string) (func(), error) { return nil, ErrUnsupported }
+
+// Supported reports whether advisory locks are implemented on this platform.
+func Supported() bool { return false }

@@ -1,6 +1,7 @@
 package lease
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gshepptech/interlock/internal/state"
 )
 
 func store(t *testing.T, ttl time.Duration, clock *time.Time) *Store {
@@ -24,6 +27,27 @@ func store(t *testing.T, ttl time.Duration, clock *time.Time) *Store {
 
 func holder(session, team string) Holder {
 	return Holder{Team: team, Agent: "claude", SessionID: session, PID: os.Getpid()}
+}
+
+func TestCheckIsNonMutatingAndValidatesExistingState(t *testing.T) {
+	root := t.TempDir()
+	if err := Check(root); err != nil {
+		t.Fatalf("Check absent state: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".interlock")); !os.IsNotExist(err) {
+		t.Fatalf("Check created state: %v", err)
+	}
+
+	statePath := filepath.Join(root, ".interlock", "leases")
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(statePath, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("seed invalid state: %v", err)
+	}
+	if err := Check(root); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("Check invalid state = %v", err)
+	}
 }
 
 func TestFreePathIsGranted(t *testing.T) {
@@ -289,6 +313,9 @@ func TestUnreadableLeaseIsReplaced(t *testing.T) {
 	now := time.Now()
 	s := store(t, DefaultTTL, &now)
 
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		t.Fatalf("mkdir lease dir: %v", err)
+	}
 	if err := os.WriteFile(s.pathFor("openapi.yaml"), []byte("{not json"), 0o644); err != nil {
 		t.Fatalf("plant corrupt lease: %v", err)
 	}
@@ -317,6 +344,47 @@ func TestDifferentPathsDoNotShareALease(t *testing.T) {
 	}
 	if !granted {
 		t.Fatal("a different path was refused, so paths are colliding")
+	}
+}
+
+func TestLeaseWritesCurrentVersion(t *testing.T) {
+	now := time.Now()
+	s := store(t, DefaultTTL, &now)
+	if _, _, err := s.Acquire("a.go", holder("s1", "backend")); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	l, err := readLease(s.pathFor("a.go"))
+	if err != nil {
+		t.Fatalf("readLease: %v", err)
+	}
+	if l.Version != state.CurrentVersion {
+		t.Errorf("version = %d, want %d", l.Version, state.CurrentVersion)
+	}
+}
+
+func TestFutureLeaseIsNeverAcquiredOrReleased(t *testing.T) {
+	now := time.Now()
+	s := store(t, DefaultTTL, &now)
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	file := s.pathFor("future.go")
+	original := []byte(`{"version":99,"path":"future.go","session_id":"s1"}`)
+	if err := os.WriteFile(file, original, 0o644); err != nil {
+		t.Fatalf("seed future: %v", err)
+	}
+
+	_, _, err := s.Acquire("future.go", holder("s2", "frontend"))
+	var unsupported *state.UnsupportedVersionError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("Acquire error = %v, want UnsupportedVersionError", err)
+	}
+	if _, err := s.Release("s1"); !errors.As(err, &unsupported) {
+		t.Fatalf("Release error = %v, want UnsupportedVersionError", err)
+	}
+	got, err := os.ReadFile(file)
+	if err != nil || string(got) != string(original) {
+		t.Fatalf("future lease changed: got=%q err=%v", got, err)
 	}
 }
 

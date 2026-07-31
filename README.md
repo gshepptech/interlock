@@ -13,9 +13,9 @@ They see each other. Nothing to configure.
 <br>
 
 ![Go](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go&logoColor=white)
-![Dependencies](https://img.shields.io/badge/runtime_deps-0-1c7a4b?style=flat-square)
+![Dependencies](https://img.shields.io/badge/runtime_deps-1-1c7a4b?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-14181b?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-138-1c7a4b?style=flat-square)
+![Tests](https://img.shields.io/badge/test_suite-passing-1c7a4b?style=flat-square)
 ![Status](https://img.shields.io/badge/status-pre--release-b57500?style=flat-square)
 
 </div>
@@ -50,8 +50,8 @@ That is an instruction to the human. Interlock is that instruction, enforced.
 </picture>
 
 A signalling panel, because an interlocking is one. Files are track sections that
-are occupied or clear. Every agent shows an aspect: **green** working, **amber**
-waiting, **red** blocked.
+are occupied or clear. Observed agents show **green** recent, **amber** quiet,
+or **red** blocked activity without pretending hook recency proves active work.
 
 ---
 
@@ -61,18 +61,19 @@ waiting, **red** blocked.
 go install github.com/gshepptech/interlock/cmd/interlock@latest
 
 cd /your/repo
-interlock init        # wires the hooks. Writes no config.
+interlock init        # wires the hooks and trusts the exact Codex commands
 interlock doctor      # confirms it is actually enforcing
+interlock doctor --smoke # executes each installed hook command end to end
 interlock dashboard   # the panel, on 127.0.0.1:7717
 ```
 
 Then open your agents and give them work. That is the whole setup.
 
 > [!IMPORTANT]
-> Codex loads project hooks only from a **trusted** project and skips them
-> silently otherwise, so half an install looks exactly like a working one.
-> `interlock doctor` checks for this by name. It is the one step that cannot be
-> done for you.
+> Codex loads project hooks only from a **trusted** project, and command hooks
+> run only after their exact command hash is trusted. `interlock init` writes
+> both entries to `~/.codex/config.toml`; `interlock doctor` checks them by name
+> so a half install does not look quiet.
 
 ---
 
@@ -215,12 +216,18 @@ up" on a second run.
 
 | | |
 |---|---|
-| `interlock init` | Wire the hooks into each agent's own settings. Merges, never replaces. Safe to run twice. |
+| `interlock init` | Wire the hooks into each agent's own settings and trust the exact Codex hook commands. Merges, never replaces. Safe to run twice. |
 | `interlock init --dry-run` | Show exactly what would change first. |
 | `interlock init --uninstall` | Take only our hooks back out. |
 | `interlock doctor` | Find the ways this can be installed and silently not enforce. |
+| `interlock doctor --fix` | Repair missing or stale hooks, trust, and ignore state, then check again. |
+| `interlock doctor --smoke` | Execute each exact installed session hook and verify its state appears. |
+| `interlock cleanup [--dry-run]` | Remove sessions and related runtime state after their observation expires. |
+| `interlock cleanup --session ID --confirm ID` | Remove one expired session after rechecking it under lock. |
+| `interlock lease release ID --confirm ID` | Release only one session's file holds. |
+| `interlock handoff request\|list\|show\|resolve` | Manage the bounded lightweight handoff request queue. |
 | `interlock status` | Territory and who holds what, in the terminal. |
-| `interlock dashboard` | The panel. Loopback only, and it refuses any other address. |
+| `interlock dashboard` | The loopback-only panel, including stale-session, lease, diagnostic, and handoff controls. |
 
 ---
 
@@ -235,12 +242,16 @@ up" on a second run.
   a single normalised event, so a new agent is one adapter and nothing else.
 - **Reads never mutate.** Expired claims are skipped, not deleted, so a reader
   and a writer never contend and the panel needs no lock.
-- **Zero runtime dependencies.** A hook runs on every tool call, so the artifact
-  is one static binary with nothing to resolve at startup. That is also why this
-  is Go and not Node: process start is on the hot path.
-- **The panel fetches nothing.** No script, no font, no CDN. It renders paths and
-  model names that came out of another tool's session files, so everything is
-  escaped and nothing leaves the machine.
+- **One runtime dependency, and it had to earn its place.** A hook runs on every
+  tool call, so the artifact is one static binary with nothing to resolve at
+  startup. That is also why this is Go and not Node: process start is on the hot
+  path. The exception is a TOML parser, taken on because repairing Codex's trust
+  configuration means editing a file the user owns, and doing that with string
+  matching is how you corrupt someone's setup.
+- **The panel fetches nothing external.** No external script, font, CDN, or
+  telemetry. Its small same-origin status refresh and confirmed actions stay on
+  the loopback server. Rendered paths, model names, and notes are escaped. With
+  JavaScript disabled, it remains a read-only status panel and hides controls.
 
 <details>
 <summary><b>Three bugs worth recording</b></summary>
@@ -277,6 +288,10 @@ back.
 Working, and verified end to end against real Claude Code and Codex sessions on
 one machine. Not yet used in anger.
 
+The [roadmap](ROADMAP.md) takes the coordination core through dashboard control,
+managed agent processes, durable tasks and handoffs, plan orchestration,
+worktree strategies, policy and approvals, and a stable v1 release.
+
 **Known limits, stated plainly, because a coordination tool that implies coverage
 it does not have is worse than none:**
 
@@ -302,11 +317,18 @@ internal/lease/       one holder at a time, flock-guarded
 internal/session/     who is here and what they last touched
 internal/shellscan/   paths a shell command is likely to write
 internal/gitstate/    what a command actually changed
+internal/verification/ pending snapshots for opaque command checks
 internal/remedy/      narrow permission to undo a flagged write
 internal/journal/     what was prevented, capped
 internal/territory/   optional path rules
 internal/dashboard/   the panel, server-rendered
+internal/control/     shared typed control actions for CLI and dashboard
+internal/controlhttp/ strict loopback HTTP envelope for control actions
+internal/handoffrequest/ bounded immutable request and resolution records
 internal/install/     merging hooks into each agent's own settings
+internal/diagnostic/  typed checks, safe repairs, and smoke verification
+internal/cleanup/     explicit expiry-safe runtime cleanup
+internal/state/       persisted-state schema compatibility
 ```
 
 `internal/hookio/testdata` holds payloads captured from real sessions. If a
