@@ -1192,6 +1192,10 @@ func uninstallHooks(root string, dryRun bool) int {
 			fmt.Printf("%s: removed %s from %s\n",
 				target.Agent, strings.Join(change.Removed, ", "), rel(root, change.File))
 		}
+		for _, old := range change.Superseded {
+			fmt.Printf("%s: also removed %s from %s, left by an older version\n",
+				target.Agent, strings.Join(old.Removed, ", "), rel(root, old.File))
+		}
 	}
 	fmt.Printf("\n%s and .interlock/ are left in place. Delete them if you are done.\n",
 		config.FileName)

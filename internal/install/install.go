@@ -37,6 +37,10 @@ const claudeWriteTools = "Write|Edit|MultiEdit|NotebookEdit|Bash"
 type Target struct {
 	Agent string
 	File  string
+	// Superseded are files this tool used to install into. Nothing is ever
+	// written to them, but they are still read, so an install made by an older
+	// version can be found and removed rather than left firing invisibly.
+	Superseded []string
 	// Events maps a hook event to the matcher it needs. An empty matcher means
 	// the agent does not support them, or that every tool should fire.
 	Events map[string]string
@@ -54,7 +58,14 @@ func Plan(root string) []Target {
 	return []Target{
 		{
 			Agent: "claude",
-			File:  filepath.Join(root, ".claude", "settings.json"),
+			// settings.local.json, not settings.json. Every hook we write names
+			// an absolute path to this machine's binary, and settings.json is
+			// the shareable file people commit. Committing a hook that points
+			// at /Users/somebody/go/bin/interlock means everyone who pulls the
+			// repo runs a missing command on every tool call. settings.local.json
+			// is the file Claude Code provides for exactly this.
+			File:       filepath.Join(root, ".claude", "settings.local.json"),
+			Superseded: []string{filepath.Join(root, ".claude", "settings.json")},
 			Events: map[string]string{
 				"SessionStart": "",
 				"PreToolUse":   claudeWriteTools,
@@ -81,11 +92,14 @@ func Plan(root string) []Target {
 
 // Change reports what happened to one file.
 type Change struct {
-	File    string
-	Added   []string
-	Updated []string
-	Removed []string
-	Backup  string
+	// Superseded holds what was cleaned out of files this tool no longer writes
+	// to, so a caller can report an old install being removed.
+	Superseded []Change
+	File       string
+	Added      []string
+	Updated    []string
+	Removed    []string
+	Backup     string
 }
 
 // Changed reports whether anything was written.
@@ -457,10 +471,30 @@ func sortedEvents(events map[string]string) []string {
 
 // Remove takes this tool's hooks back out and leaves everything else alone.
 // Anything that installs into a user's file owes them an uninstall.
+// Remove takes this tool's hooks out of the current file and out of any file it
+// used to install into. Skipping the superseded ones would leave an old install
+// firing on every tool call with nothing in the current file to explain it.
 func Remove(t Target, dryRun bool) (Change, error) {
-	change := Change{File: t.File}
+	change, err := removeFrom(t, t.File, dryRun)
+	if err != nil {
+		return change, err
+	}
+	for _, old := range t.Superseded {
+		stale, err := removeFrom(t, old, dryRun)
+		if err != nil {
+			return change, err
+		}
+		if stale.Changed() {
+			change.Superseded = append(change.Superseded, stale)
+		}
+	}
+	return change, nil
+}
 
-	doc, original, err := readJSON(t.File)
+func removeFrom(t Target, file string, dryRun bool) (Change, error) {
+	change := Change{File: file}
+
+	doc, original, err := readJSON(file)
 	if err != nil || !original.existed {
 		return change, err
 	}
@@ -511,7 +545,7 @@ func Remove(t Target, dryRun bool) (Change, error) {
 	if len(hooks) == 0 {
 		delete(doc, "hooks")
 	}
-	return change, writeJSON(t.File, doc, original)
+	return change, writeJSON(file, doc, original)
 }
 
 // Installed reports which of the target's events already carry our hook, sorted.
@@ -519,8 +553,26 @@ func Remove(t Target, dryRun bool) (Change, error) {
 // This is what makes a half-installed setup visible. A settings file that cannot
 // be parsed is an error rather than an empty list, because "unreadable" and
 // "not installed" call for different fixes.
-func Installed(t Target) ([]string, error) {
-	doc, existed, err := read(t.File)
+// Superseded reports events still wired up in a file this tool no longer writes
+// to. Anything here is an old install that is still firing.
+func Superseded(t Target) (map[string][]string, error) {
+	found := map[string][]string{}
+	for _, old := range t.Superseded {
+		wired, err := installedIn(t, old)
+		if err != nil {
+			return nil, err
+		}
+		if len(wired) > 0 {
+			found[old] = wired
+		}
+	}
+	return found, nil
+}
+
+func Installed(t Target) ([]string, error) { return installedIn(t, t.File) }
+
+func installedIn(t Target, file string) ([]string, error) {
+	doc, existed, err := read(file)
 	if err != nil || !existed {
 		return nil, err
 	}

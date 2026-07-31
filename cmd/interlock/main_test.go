@@ -18,6 +18,7 @@ import (
 	"github.com/gshepptech/interlock/internal/cleanup"
 	"github.com/gshepptech/interlock/internal/config"
 	"github.com/gshepptech/interlock/internal/dashboard"
+	"github.com/gshepptech/interlock/internal/install"
 	"github.com/gshepptech/interlock/internal/session"
 )
 
@@ -661,7 +662,7 @@ func TestDoctorFixRepairsHooksAfterBinaryMoves(t *testing.T) {
 	}
 	oldPath := "/old/location/interlock"
 	for _, file := range []string{
-		filepath.Join(dir, ".claude", "settings.json"),
+		claudeSettings(dir),
 		filepath.Join(dir, ".codex", "hooks.json"),
 	} {
 		raw, err := os.ReadFile(file)
@@ -686,7 +687,7 @@ func TestDoctorFixRepairsHooksAfterBinaryMoves(t *testing.T) {
 		t.Fatalf("doctor --fix failed: stdout=%s stderr=%s", fixed.stdout, fixed.stderr)
 	}
 	for _, file := range []string{
-		filepath.Join(dir, ".claude", "settings.json"),
+		claudeSettings(dir),
 		filepath.Join(dir, ".codex", "hooks.json"),
 	} {
 		raw, err := os.ReadFile(file)
@@ -967,7 +968,7 @@ func TestInstalledConfigActuallyFiresForEveryWritingTool(t *testing.T) {
 		t.Fatalf("init failed: %s%s", res.stdout, res.stderr)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	raw, err := os.ReadFile(claudeSettings(dir))
 	if err != nil {
 		t.Fatalf("read installed settings: %v", err)
 	}
@@ -1004,5 +1005,82 @@ func TestInstalledConfigActuallyFiresForEveryWritingTool(t *testing.T) {
 					"is never checked.", event, tool)
 			}
 		}
+	}
+}
+
+// claudeSettings asks the installer where Claude Code's hooks go, rather than
+// repeating the path. When that moved from settings.json to settings.local.json
+// the hardcoded copies in these tests were the only thing that broke.
+func claudeSettings(root string) string {
+	for _, target := range install.Plan(root) {
+		if target.Agent == "claude" {
+			return target.File
+		}
+	}
+	panic("no claude target in the plan")
+}
+
+// The hooks name an absolute path to one machine's binary. settings.json is the
+// file Claude Code treats as shareable and people commit, so installing there
+// means everyone who pulls the repo runs a command that does not exist on their
+// machine.
+func TestClaudeHooksGoInTheLocalSettingsFile(t *testing.T) {
+	dir := t.TempDir()
+	file := claudeSettings(dir)
+
+	if filepath.Base(file) != "settings.local.json" {
+		t.Errorf("claude hooks install into %s, want settings.local.json",
+			filepath.Base(file))
+	}
+
+	// And the superseded location must still be searched, or an install from an
+	// older version keeps firing with nothing in the current file to explain it.
+	var claude install.Target
+	for _, target := range install.Plan(dir) {
+		if target.Agent == "claude" {
+			claude = target
+		}
+	}
+	if len(claude.Superseded) == 0 {
+		t.Fatal("no superseded paths, so an older install can never be found or removed")
+	}
+	if !slices.ContainsFunc(claude.Superseded, func(p string) bool {
+		return filepath.Base(p) == "settings.json"
+	}) {
+		t.Errorf("Superseded = %v, want the old settings.json", claude.Superseded)
+	}
+}
+
+// Uninstalling has to clean the old location too.
+func TestUninstallRemovesHooksLeftInTheOldLocation(t *testing.T) {
+	dir := repo(t, defaultConfig)
+	old := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(old), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// An install as an older version would have left it.
+	legacy := `{"hooks":{"PreToolUse":[{"matcher":"Write","hooks":[` +
+		`{"type":"command","command":"/old/path/interlock hook PreToolUse claude"}]}]}}`
+	if err := os.WriteFile(old, []byte(legacy), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if res := cli(t, dir, "init"); res.exit > 1 {
+		t.Fatalf("init: %s%s", res.stdout, res.stderr)
+	}
+	if res := cli(t, dir, "doctor"); !strings.Contains(res.stdout, "older version") {
+		t.Errorf("doctor does not report hooks left in the old file:\n%s", res.stdout)
+	}
+
+	res := cli(t, dir, "init", "--uninstall")
+	if !strings.Contains(res.stdout, "older version") {
+		t.Errorf("uninstall does not mention cleaning the old file:\n%s", res.stdout)
+	}
+	raw, err := os.ReadFile(old)
+	if err != nil {
+		t.Fatalf("read old settings: %v", err)
+	}
+	if strings.Contains(string(raw), "interlock hook") {
+		t.Errorf("our hooks are still in the old file: %s", raw)
 	}
 }

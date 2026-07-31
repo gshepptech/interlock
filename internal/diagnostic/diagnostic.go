@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -143,6 +144,7 @@ func (s Service) Check(opts Options) (Report, error) {
 	for _, target := range targets {
 		status, inspectErr := install.Inspect(target, opts.Executable)
 		add(hookCheck(target, status, inspectErr))
+		add(supersededCheck(target))
 	}
 
 	codexTarget := targetFor(targets, "codex")
@@ -614,4 +616,44 @@ func inspectState(root string) ([]state.Issue, error) {
 		issues = append(issues, found...)
 	}
 	return issues, nil
+}
+
+// supersededCheck reports hooks left behind in a file this tool no longer
+// installs into.
+//
+// Interlock used to write Claude Code's hooks into .claude/settings.json, which
+// is the shareable file people commit. Every hook it writes names an absolute
+// path to one machine's binary, so committing them makes every teammate run a
+// missing command on every tool call. It writes settings.local.json now, and an
+// install left in the old file keeps firing with nothing in the new one to
+// explain it.
+func supersededCheck(target install.Target) Check {
+	subject := target.Agent + " old hooks"
+	found, err := install.Superseded(target)
+	if err != nil {
+		return Check{
+			ID: target.Agent + "_superseded_hooks", Subject: subject,
+			Severity: Warn, Detail: err.Error(),
+		}
+	}
+	if len(found) == 0 {
+		return Check{
+			ID: target.Agent + "_superseded_hooks", Subject: subject,
+			Severity: OK, Detail: "none",
+		}
+	}
+
+	files := make([]string, 0, len(found))
+	for file, events := range found {
+		files = append(files, fmt.Sprintf("%s (%s)", file, strings.Join(events, ", ")))
+	}
+	slices.Sort(files)
+	return Check{
+		ID: target.Agent + "_superseded_hooks", Subject: subject, Severity: Warn,
+		Detail: "hooks from an older version are still installed in " +
+			strings.Join(files, "; ") +
+			". They point at a path that may not exist on other machines. " +
+			"Run interlock init --uninstall then interlock init.",
+		Repairable: false,
+	}
 }
