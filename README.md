@@ -69,11 +69,20 @@ interlock dashboard   # the panel, on 127.0.0.1:7717
 
 Then open your agents and give them work. That is the whole setup.
 
-> [!IMPORTANT]
-> Codex loads project hooks only from a **trusted** project, and command hooks
-> run only after their exact command hash is trusted. `interlock init` writes
-> both entries to `~/.codex/config.toml`; `interlock doctor` checks them by name
-> so a half install does not look quiet.
+> [!WARNING]
+> **The Codex side is currently broken by an upstream change, as of
+> `codex-cli 0.146.0-alpha.9.2`.** Codex moved into `ChatGPT.app` and changed how
+> it records trust for project hooks, so the entries `interlock init` writes are
+> no longer accepted and Codex skips its hooks without saying anything.
+>
+> `interlock doctor` reports that trust as healthy while this is happening,
+> because it verifies its own bookkeeping rather than asking Codex. That is the
+> exact silent half-install it exists to catch, so treat its Codex trust lines as
+> unreliable until this is fixed.
+>
+> Claude Code is unaffected, and the Codex hook contract itself is intact: every
+> hook fires correctly under `--dangerously-bypass-hook-trust`. Only the trust
+> handshake needs rewriting.
 
 ---
 
