@@ -31,6 +31,7 @@ import (
 	"github.com/gshepptech/interlock/internal/install"
 	"github.com/gshepptech/interlock/internal/journal"
 	"github.com/gshepptech/interlock/internal/lease"
+	"github.com/gshepptech/interlock/internal/observed"
 	"github.com/gshepptech/interlock/internal/remedy"
 	"github.com/gshepptech/interlock/internal/session"
 	"github.com/gshepptech/interlock/internal/shellscan"
@@ -143,6 +144,9 @@ func runHook(args []string) int {
 	}
 
 	team := cfg.TeamFor(string(agent))
+	// Evidence that this agent really does invoke our hooks. Recorded before
+	// anything can decline or fail, because the fact of the call is the point.
+	markObserved(cfg, string(agent))
 
 	switch event {
 	case "SessionStart":
@@ -1452,4 +1456,17 @@ func clearRemedy(cfg *config.Config, sessionID string) {
 		return
 	}
 	store.Clear(sessionID)
+}
+
+// markObserved records that an agent invoked a hook here. Errors are dropped:
+// failing to note the call is not a reason to fail the call.
+func markObserved(cfg *config.Config, agent string) {
+	if agent == "" {
+		return
+	}
+	store, err := observed.Open(cfg.Root)
+	if err != nil {
+		return
+	}
+	store.Mark(agent)
 }

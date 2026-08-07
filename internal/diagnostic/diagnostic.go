@@ -23,6 +23,7 @@ import (
 	"github.com/gshepptech/interlock/internal/install"
 	"github.com/gshepptech/interlock/internal/journal"
 	"github.com/gshepptech/interlock/internal/lease"
+	"github.com/gshepptech/interlock/internal/observed"
 	"github.com/gshepptech/interlock/internal/remedy"
 	"github.com/gshepptech/interlock/internal/session"
 	"github.com/gshepptech/interlock/internal/state"
@@ -145,6 +146,7 @@ func (s Service) Check(opts Options) (Report, error) {
 		status, inspectErr := install.Inspect(target, opts.Executable)
 		add(hookCheck(target, status, inspectErr))
 		add(supersededCheck(target))
+		add(observedCheck(cfg.Root, target, status))
 	}
 
 	codexTarget := targetFor(targets, "codex")
@@ -172,9 +174,19 @@ func (s Service) Check(opts Options) (Report, error) {
 			})
 		} else {
 			trust = install.InspectCodexHookTrust(opts.CodexFile, entries)
+			detail := trust.Detail
+			if trust.State == install.TrustHealthy {
+				// This only says the entries Interlock writes are present and
+				// match what Interlock would write. Whether Codex accepts them
+				// is Codex's decision, made against a format that has changed
+				// before, and it cannot be read from here. Claiming otherwise
+				// is how a silent half-install passed every check.
+				detail += " (written by Interlock; whether Codex accepts them " +
+					"is only visible in the \"actually running\" check)"
+			}
 			add(Check{
 				ID: "codex_hook_trust", Subject: "codex hook trust",
-				Severity: severity(trust.State == install.TrustHealthy), Detail: trust.Detail,
+				Severity: severity(trust.State == install.TrustHealthy), Detail: detail,
 				Repairable: trust.Repairable(),
 			})
 		}
@@ -655,5 +667,52 @@ func supersededCheck(target install.Target) Check {
 			". They point at a path that may not exist on other machines. " +
 			"Run interlock init --uninstall then interlock init.",
 		Repairable: false,
+	}
+}
+
+// observedCheck reports whether an agent has ever actually invoked our hooks.
+//
+// Every other installation check reads Interlock's own bookkeeping: the hooks
+// are in the settings file, the trust entries are in the config, the smoke test
+// ran the hook command itself. All of that passed while Codex was silently
+// skipping its hooks after an upstream change, because none of it is evidence
+// that the agent runs them. Only the agent can provide that, and the absence of
+// a single call is the one honest signal available.
+//
+// It is a warning rather than a failure. An agent that has never been seen may
+// simply never have been used here, and this check cannot tell the difference.
+// It names the likely cause instead of guessing.
+func observedCheck(root string, target install.Target, status install.Status) Check {
+	id := target.Agent + "_observed"
+	subject := target.Agent + " actually running"
+
+	installed := false
+	for _, event := range status.Events {
+		if event.State == install.Healthy {
+			installed = true
+			break
+		}
+	}
+	if !installed {
+		return Check{ID: id, Subject: subject, Severity: OK,
+			Detail: "not applicable, hooks are not installed"}
+	}
+
+	store, err := observed.Open(root)
+	if err != nil {
+		return Check{ID: id, Subject: subject, Severity: Warn, Detail: err.Error()}
+	}
+	record, err := store.Get(target.Agent)
+	if err != nil || record.Count == 0 {
+		return Check{ID: id, Subject: subject, Severity: Warn,
+			Detail: "hooks are installed but " + target.Agent + " has never invoked " +
+				"them here, so nothing is being enforced for it. Either it has not " +
+				"been used in this repository yet, or it is skipping the hooks. Run " +
+				target.Agent + " once and check this again.",
+		}
+	}
+	return Check{ID: id, Subject: subject, Severity: OK,
+		Detail: fmt.Sprintf("%d hook calls, last %s ago",
+			record.Count, time.Since(record.Last).Round(time.Second)),
 	}
 }
