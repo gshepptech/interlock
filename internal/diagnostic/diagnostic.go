@@ -21,6 +21,7 @@ import (
 	"github.com/gshepptech/interlock/internal/gitstate"
 	"github.com/gshepptech/interlock/internal/handoffrequest"
 	"github.com/gshepptech/interlock/internal/install"
+	"github.com/gshepptech/interlock/internal/instructions"
 	"github.com/gshepptech/interlock/internal/journal"
 	"github.com/gshepptech/interlock/internal/lease"
 	"github.com/gshepptech/interlock/internal/observed"
@@ -140,6 +141,24 @@ func (s Service) Check(opts Options) (Report, error) {
 		})
 	}
 	add(Check{ID: "repo", Subject: "repo", Severity: OK, Detail: cfg.Root})
+
+	// The instructions are the only thing coordinating an agent whose hooks
+	// cannot run, so their absence is a real gap rather than a nicety.
+	present, current := instructions.Installed(cfg.Root)
+	switch {
+	case !present:
+		add(Check{ID: "instructions", Subject: "agent instructions", Severity: Fail,
+			Detail: "no coordination section in " + instructions.FileName +
+				"; agents whose hooks cannot run have no way to know what is held. " +
+				"Run interlock init.", Repairable: true})
+	case !current:
+		add(Check{ID: "instructions", Subject: "agent instructions", Severity: Warn,
+			Detail: "the coordination section in " + instructions.FileName +
+				" is from an older version. Run interlock init.", Repairable: true})
+	default:
+		add(Check{ID: "instructions", Subject: "agent instructions", Severity: OK,
+			Detail: "coordination section present in " + instructions.FileName})
+	}
 
 	targets := install.Plan(cfg.Root)
 	for _, target := range targets {
@@ -304,6 +323,13 @@ func (s Service) Repair(opts Options, dryRun bool) ([]Repair, error) {
 			Detail: choose(ignored, "already ignored", "would add .interlock/"),
 		})
 	} else {
+		if change, insErr := instructions.Apply(cfg.Root, dryRun); insErr != nil {
+			errs = append(errs, insErr)
+		} else if change.Changed() {
+			repairs = append(repairs, Repair{ID: "instructions", Changed: true,
+				Detail: "wrote the coordination section to " + instructions.FileName})
+		}
+
 		added, ignoreErr := install.Gitignore(cfg.Root, ".interlock/")
 		if ignoreErr != nil {
 			errs = append(errs, fmt.Errorf("gitignore: %w", ignoreErr))

@@ -69,21 +69,17 @@ interlock dashboard   # the panel, on 127.0.0.1:7717
 
 Then open your agents and give them work. That is the whole setup.
 
-> [!WARNING]
-> **The Codex side is currently broken by an upstream change, as of
-> `codex-cli 0.146.0-alpha.9.2`.** Codex moved into `ChatGPT.app` and changed how
-> it records trust for project hooks, so the entries `interlock init` writes are
-> no longer accepted and Codex skips its hooks without saying anything.
+> [!NOTE]
+> **Codex is coordinated through instructions, not hooks.** Codex requires hook
+> trust and, as of `codex-cli 0.146`, offers no way to grant it, so its hooks do
+> not run. Interlock therefore writes a short section into `AGENTS.md` telling
+> agents to run `interlock check <path>` before editing, and Codex follows it:
+> in a live session it ran the check, found a file held by Claude, retried, and
+> refused to edit rather than working around it.
 >
-> `interlock doctor` reports that trust as healthy while this is happening,
-> because it verifies its own bookkeeping rather than asking Codex. That is the
-> exact silent half-install it exists to catch, so treat its Codex trust lines as
-> unreliable until this is fixed.
->
-> Claude Code is unaffected, and the Codex hook contract itself is intact: every
-> hook fires correctly under `--dangerously-bypass-hook-trust`. Only the trust
-> handshake needs rewriting.
-
+> That is cooperative rather than enforced. Claude Code's hooks still block
+> writes outright. Launching Codex with `--dangerously-bypass-hook-trust` gets
+> it the enforced path too, at the cost of starting it from a terminal.
 ---
 
 ## How it works
