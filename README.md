@@ -80,12 +80,19 @@ Then open your agents and give them work. That is the whole setup.
 > That is cooperative rather than enforced. Claude Code's hooks still block
 > writes outright. Launching Codex with `--dangerously-bypass-hook-trust` gets
 > it the enforced path too, at the cost of starting it from a terminal.
+
 ---
 
 ## How it works
 
-Hooks, not MCP. An MCP tool only runs if the model decides to call it. A hook
-fires whether the model cooperates or not.
+Hooks where they can run, instructions where they cannot.
+
+A hook fires whether or not the model cooperates, which is why it is the first
+choice and why Claude Code writes are genuinely blocked. Codex will not run
+hooks without trust it no longer grants, so it is reached the other way: the
+repository's instructions tell it to check before editing, and it does. That
+depends on the model cooperating, and it is the honest ceiling for an agent that
+cannot be intercepted.
 
 ```mermaid
 sequenceDiagram
@@ -111,6 +118,7 @@ sequenceDiagram
 |---|---|---|
 | **Awareness** | Needs no rules, does most of the work | Each agent is told who else is live and which directories they are working in. An agent that knows where its peer is usually stays out of the way without ever being refused anything. |
 | **Claims** | The backstop | Writing a file claims it for 90 seconds, renewed on every touch, released when the session ends. A second agent is refused and told who has it. |
+| **Instructions** | For agents whose hooks cannot run | `AGENTS.md` carries one rule: run `interlock check <path>` before editing, and treat exit 2 as a scheduling conflict rather than a permission one. Cooperative, but a live Codex session followed it, retried, and refused to work around a held file. |
 | **Verification** | For what cannot be judged in advance | `python3 build.py` writes somewhere and nothing before it runs says where. The tree is snapshotted either side of the command, and anything that landed out of bounds is reported back to the agent, which can then revert it. |
 
 <details>
