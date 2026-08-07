@@ -40,6 +40,11 @@ type SessionResult struct {
 type Result struct {
 	DryRun   bool
 	Sessions []SessionResult
+	// LeasesPruned counts expired leases swept that belonged to no session
+	// still on record. Releasing a session takes its own leases with it, but a
+	// session that expired long ago leaves its leases behind with nothing left
+	// to attribute them to.
+	LeasesPruned int
 }
 
 // Service coordinates cleanup across the individual runtime stores.
@@ -99,6 +104,17 @@ func (s Service) Run(dryRun bool) (Result, error) {
 		}
 		result.Sessions = append(result.Sessions, item)
 	}
+
+	// Sweep expired leases with no session left to own them. Without this a
+	// repository in daily use keeps one file per file ever edited: seven days
+	// of real work left 109 expired leases behind 2 live ones, and every read
+	// walked all 111.
+	pruned, pruneErr := stores.leases.Prune()
+	if pruneErr != nil {
+		allErrs = append(allErrs, fmt.Errorf("prune expired leases: %w", pruneErr))
+	}
+	result.LeasesPruned = pruned
+
 	return result, errors.Join(allErrs...)
 }
 

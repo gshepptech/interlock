@@ -426,3 +426,118 @@ func TestDescribeNamesTheHolderAndHowLong(t *testing.T) {
 		}
 	}
 }
+
+// Nothing used to delete expired leases, so a repository in daily use grew one
+// file per file ever edited. A week of real work left 109 expired leases behind
+// 2 live ones, and every read walked all 111.
+func TestPruneRemovesExpiredButKeepsLive(t *testing.T) {
+	now := time.Now()
+	s := store(t, time.Minute, &now)
+
+	for _, p := range []string{"old-a.go", "old-b.go", "old-c.go"} {
+		if _, _, err := s.Acquire(p, holder("gone", "team")); err != nil {
+			t.Fatalf("Acquire %s: %v", p, err)
+		}
+	}
+	now = now.Add(2 * time.Minute) // those three expire
+
+	if _, _, err := s.Acquire("live.go", holder("current", "team")); err != nil {
+		t.Fatalf("Acquire live: %v", err)
+	}
+
+	pruned, err := s.Prune()
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if pruned != 3 {
+		t.Errorf("pruned %d, want the 3 expired", pruned)
+	}
+
+	active, err := s.Active()
+	if err != nil {
+		t.Fatalf("Active: %v", err)
+	}
+	if len(active) != 1 || active[0].Path != "live.go" {
+		t.Fatalf("active = %+v, want only the live lease", active)
+	}
+	// And the live one must still be enforced, not merely listed.
+	granted, current, err := s.Acquire("live.go", holder("someone-else", "team"))
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if granted {
+		t.Error("a live lease was pruned out from under its holder")
+	}
+	if current.SessionID != "current" {
+		t.Errorf("holder = %s, want current", current.SessionID)
+	}
+}
+
+// A session ending is the natural moment to sweep, and it already holds the
+// lock and reads the directory, so it costs nothing extra.
+func TestReleaseAlsoPrunesExpiredLeases(t *testing.T) {
+	now := time.Now()
+	s := store(t, time.Minute, &now)
+
+	if _, _, err := s.Acquire("stale.go", holder("old-session", "team")); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	now = now.Add(2 * time.Minute)
+	if _, _, err := s.Acquire("mine.go", holder("ending", "team")); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	if _, err := s.Release("ending"); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	left := 0
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".json" {
+			left++
+		}
+	}
+	if left != 0 {
+		t.Errorf("%d lease files remain; the expired one was not swept", left)
+	}
+}
+
+// An unreadable lease is honoured by nothing and expires never, so it has to be
+// swept too or it accumulates forever.
+// Pruning a repository that has never claimed anything is a no-op, not an
+// error: the directory is created lazily on first write.
+func TestPruneOnAnUntouchedRepoIsANoOp(t *testing.T) {
+	now := time.Now()
+	s := store(t, DefaultTTL, &now)
+
+	pruned, err := s.Prune()
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if pruned != 0 {
+		t.Errorf("pruned %d, want 0", pruned)
+	}
+}
+
+func TestPruneRemovesUnreadableLeases(t *testing.T) {
+	now := time.Now()
+	s := store(t, DefaultTTL, &now)
+
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(s.pathFor("broken.go"), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("plant: %v", err)
+	}
+	pruned, err := s.Prune()
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if pruned != 1 {
+		t.Errorf("pruned %d, want the unreadable one", pruned)
+	}
+}

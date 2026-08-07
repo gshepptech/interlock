@@ -245,7 +245,59 @@ func (s *Store) Release(sessionID string) (int, error) {
 			released++
 		}
 	}
+	// Free of charge: the lock is held and the directory is already read.
+	s.pruneLocked()
 	return released, nil
+}
+
+// Prune deletes leases that have expired.
+//
+// Nothing used to remove them. A lease is written on every file an agent
+// touches and only deleted when its session ends tidily, so a repository in
+// daily use accumulates one file per file ever edited. A week of real work left
+// 109 expired leases behind two live ones, and every session start, status call
+// and dashboard render read all 111 to find the 2 that mattered.
+//
+// This runs under the same lock as acquisition and only removes leases already
+// past their hold, so a live claim can never be pruned out from under its
+// holder.
+func (s *Store) Prune() (int, error) {
+	// A repository where nothing has ever been claimed has no directory, and
+	// that is nothing to sweep rather than a failure.
+	if _, err := os.Stat(s.dir); errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	unlock, err := lockfile.Acquire(filepath.Join(s.dir, ".lock"))
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+	return s.pruneLocked()
+}
+
+// pruneLocked assumes the caller holds the store lock.
+func (s *Store) pruneLocked() (int, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return 0, fmt.Errorf("read lease dir: %w", err)
+	}
+	pruned := 0
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		file := filepath.Join(s.dir, e.Name())
+		l, err := readLease(file)
+		// An unreadable lease is honoured by nothing and expires never, so it
+		// is swept with the rest rather than left to accumulate forever.
+		if err == nil && s.live(l) {
+			continue
+		}
+		if err := os.Remove(file); err == nil {
+			pruned++
+		}
+	}
+	return pruned, nil
 }
 
 // Active lists every live lease, sorted by path so a display is stable between

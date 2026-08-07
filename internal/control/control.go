@@ -159,6 +159,15 @@ func (s Service) ClearAllStale(ctx context.Context, actor Actor) (Result, error)
 			result.Cleanup.Skipped++
 		}
 	}
+	// Sweeping orphaned leases is real work even when no session was stale, so
+	// it must not be reported as "nothing happened".
+	if cleaned.LeasesPruned > 0 && result.Cleanup.Attempted == 0 {
+		result.Outcome = Completed
+		result.Message = fmt.Sprintf("no stale sessions; swept %d expired lease(s)",
+			cleaned.LeasesPruned)
+		return s.finish(actor, result, err)
+	}
+
 	switch {
 	case result.Cleanup.Attempted == 0:
 		result.Outcome, result.Message = NoChange, "no stale sessions"

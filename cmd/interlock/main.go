@@ -719,6 +719,9 @@ func runCleanup(args []string) int {
 	if len(result.Sessions) == 0 {
 		fmt.Println("no stale sessions")
 	}
+	if result.LeasesPruned > 0 {
+		fmt.Printf("swept %d expired lease(s)\n", result.LeasesPruned)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cleanup: %v\n", err)
 		return 1

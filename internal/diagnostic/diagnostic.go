@@ -144,7 +144,8 @@ func (s Service) Check(opts Options) (Report, error) {
 	targets := install.Plan(cfg.Root)
 	for _, target := range targets {
 		status, inspectErr := install.Inspect(target, opts.Executable)
-		add(hookCheck(target, status, inspectErr))
+		stale, _ := install.Superseded(target)
+		add(hookCheck(target, status, inspectErr, stale))
 		add(supersededCheck(target))
 		add(observedCheck(cfg.Root, target, status))
 	}
@@ -342,7 +343,8 @@ func pinnedRootDrift(opts Options, pinned *config.Config) error {
 	return nil
 }
 
-func hookCheck(target install.Target, status install.Status, err error) Check {
+func hookCheck(target install.Target, status install.Status, err error,
+	superseded map[string][]string) Check {
 	check := Check{ID: target.Agent + "_hooks", Subject: target.Agent + " hooks"}
 	if err != nil {
 		check.Severity = Fail
@@ -372,7 +374,17 @@ func hookCheck(target install.Target, status install.Status, err error) Check {
 	check.Severity = Fail
 	check.Detail = strings.Join(unhealthy, ", ")
 	if missing == len(status.Events) {
-		check.Detail = "not wired up; " + check.Detail
+		// Absent from the current file does not mean absent. An install made by
+		// an older version lives somewhere this version no longer writes to,
+		// and those hooks still fire: reporting it as "not wired up" tells
+		// someone whose setup is working that it is broken.
+		if len(superseded) > 0 {
+			check.Detail = "installed in an older location and still running " +
+				"from there; migrate with interlock init --uninstall then " +
+				"interlock init"
+		} else {
+			check.Detail = "not wired up; " + check.Detail
+		}
 	}
 	check.Repairable = repairable
 	return check
