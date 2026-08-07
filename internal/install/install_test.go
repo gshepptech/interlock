@@ -728,3 +728,121 @@ func TestClaudeMatcherCoversEveryWritingTool(t *testing.T) {
 		}
 	}
 }
+
+// Uninstalling used to leave hook trust behind, so every repository Interlock
+// was ever installed into kept an entry in the user's global Codex config
+// forever. Sixty stale entries pointing at deleted directories is what prompted
+// this test.
+func TestUninstallWithdrawsCodexHookTrust(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.toml")
+
+	// A config holding our entries plus things that belong to the user.
+	seed := `model = "gpt-5.5"
+
+[projects."/some/repo"]
+trust_level = "trusted"
+
+[hooks.state."/some/repo/.codex/hooks.json:pre_tool_use:0:0"]
+trusted_hash = "sha256:aaa"
+
+[hooks.state."/some/repo/.codex/hooks.json:post_tool_use:0:0"]
+trusted_hash = "sha256:bbb"
+
+[hooks.state."/somebody/elses/.codex/hooks.json:pre_tool_use:0:0"]
+trusted_hash = "sha256:ccc"
+
+[mcp_servers.playwright]
+command = "npx"
+`
+	if err := os.WriteFile(config, []byte(seed), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	entries := []CodexTrustEntry{
+		{Key: "/some/repo/.codex/hooks.json:pre_tool_use:0:0", Hash: "sha256:aaa"},
+		{Key: "/some/repo/.codex/hooks.json:post_tool_use:0:0", Hash: "sha256:bbb"},
+	}
+
+	change, err := UntrustCodexConfig(config, entries, false)
+	if err != nil {
+		t.Fatalf("UntrustCodexConfig: %v", err)
+	}
+	if len(change.HooksRemoved) != 2 {
+		t.Errorf("removed %v, want both of ours", change.HooksRemoved)
+	}
+
+	raw, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	got := string(raw)
+
+	for _, gone := range []string{"sha256:aaa", "sha256:bbb"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("our trust entry %s survived:\n%s", gone, got)
+		}
+	}
+	// Another repository's trust is not ours to withdraw.
+	if !strings.Contains(got, "sha256:ccc") {
+		t.Errorf("removed a trust entry for a different repository:\n%s", got)
+	}
+	// Neither is anything else in the user's config.
+	for _, keep := range []string{`model = "gpt-5.5"`, "mcp_servers.playwright", `command = "npx"`} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("unrelated setting %q was lost:\n%s", keep, got)
+		}
+	}
+	// Project trust is deliberately left: the user may have set it themselves.
+	if !strings.Contains(got, `[projects."/some/repo"]`) {
+		t.Errorf("project trust was withdrawn, which is not ours to decide:\n%s", got)
+	}
+	// And the result has to still be readable by Codex.
+	if _, err := decodeTOML(raw); err != nil {
+		t.Errorf("produced invalid TOML: %v\n%s", err, got)
+	}
+}
+
+func TestUntrustIsANoOpWhenNothingIsOurs(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.toml")
+	seed := "model = \"gpt-5.5\"\n"
+	if err := os.WriteFile(config, []byte(seed), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	change, err := UntrustCodexConfig(config,
+		[]CodexTrustEntry{{Key: "/gone/.codex/hooks.json:pre_tool_use:0:0", Hash: "sha256:x"}}, false)
+	if err != nil {
+		t.Fatalf("UntrustCodexConfig: %v", err)
+	}
+	if change.Changed() {
+		t.Errorf("reported a change: %+v", change)
+	}
+	raw, _ := os.ReadFile(config)
+	if string(raw) != seed {
+		t.Errorf("modified a config with nothing of ours in it:\n%s", raw)
+	}
+}
+
+func TestUntrustDryRunWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.toml")
+	seed := "[hooks.state.\"/some/repo/.codex/hooks.json:pre_tool_use:0:0\"]\ntrusted_hash = \"sha256:aaa\"\n"
+	if err := os.WriteFile(config, []byte(seed), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	change, err := UntrustCodexConfig(config,
+		[]CodexTrustEntry{{Key: "/some/repo/.codex/hooks.json:pre_tool_use:0:0", Hash: "sha256:aaa"}}, true)
+	if err != nil {
+		t.Fatalf("UntrustCodexConfig: %v", err)
+	}
+	if len(change.HooksRemoved) != 1 {
+		t.Errorf("dry run reported %v, want the entry it would remove", change.HooksRemoved)
+	}
+	raw, _ := os.ReadFile(config)
+	if string(raw) != seed {
+		t.Errorf("dry run wrote to the file:\n%s", raw)
+	}
+}

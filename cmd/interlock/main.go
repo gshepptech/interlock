@@ -1175,6 +1175,19 @@ one team owning a directory outright, run: interlock init --with-territory
 
 func uninstallHooks(root string, dryRun bool) int {
 	failed := false
+	// Read the trust entries before the hooks file is removed, because they are
+	// derived from it and cannot be identified afterwards.
+	var codexTrust []install.CodexTrustEntry
+	for _, target := range install.Plan(root) {
+		if target.Agent != "codex" {
+			continue
+		}
+		entries, err := install.CodexTrustEntries(target)
+		if err == nil {
+			codexTrust = entries
+		}
+	}
+
 	for _, target := range install.Plan(root) {
 		change, err := install.Remove(target, dryRun)
 		if err != nil {
@@ -1197,6 +1210,26 @@ func uninstallHooks(root string, dryRun bool) int {
 				target.Agent, strings.Join(old.Removed, ", "), rel(root, old.File))
 		}
 	}
+	// Withdraw the Codex hook trust this repository was granted. Left behind, it
+	// accumulates in the user's global config for every repository Interlock was
+	// ever installed into, including ones that no longer exist.
+	if len(codexTrust) > 0 {
+		if codexFile, err := codexConfigPath(); err != nil {
+			fmt.Fprintf(os.Stderr, "codex: cannot locate config to withdraw trust: %v\n", err)
+			failed = true
+		} else if change, err := install.UntrustCodexConfig(codexFile, codexTrust, dryRun); err != nil {
+			fmt.Fprintf(os.Stderr, "codex: %v\n", err)
+			failed = true
+		} else if len(change.HooksRemoved) > 0 {
+			verb := "withdrew"
+			if dryRun {
+				verb = "would withdraw"
+			}
+			fmt.Printf("codex: %s hook trust for %d hook(s) from %s\n",
+				verb, len(change.HooksRemoved), change.File)
+		}
+	}
+
 	fmt.Printf("\n%s and .interlock/ are left in place. Delete them if you are done.\n",
 		config.FileName)
 	if failed {

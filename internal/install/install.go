@@ -154,11 +154,13 @@ type CodexTrustChange struct {
 	ProjectTrusted bool
 	HooksTrusted   []string
 	HooksUpdated   []string
+	HooksRemoved   []string
 }
 
 // Changed reports whether the Codex config file needs a write.
 func (c CodexTrustChange) Changed() bool {
-	return c.ProjectTrusted || len(c.HooksTrusted) > 0 || len(c.HooksUpdated) > 0
+	return c.ProjectTrusted || len(c.HooksTrusted) > 0 ||
+		len(c.HooksUpdated) > 0 || len(c.HooksRemoved) > 0
 }
 
 // Apply merges the target's hooks into its settings file. It reports what it
@@ -1029,3 +1031,48 @@ func Gitignore(root, line string) (bool, error) {
 }
 
 func sortStrings(s []string) { slices.Sort(s) }
+
+// UntrustCodexConfig removes the hook trust this tool added for a repository.
+//
+// Uninstalling used to leave these behind, so every repository Interlock was
+// ever installed into kept an entry in the user's global Codex config forever,
+// including throwaway ones. Sixty stale entries pointing at deleted directories
+// is what prompted this.
+//
+// Project trust is deliberately left alone. Interlock may have set it, but the
+// user may equally have trusted that repository for their own reasons, and
+// silently withdrawing it would change how Codex behaves in a repository that
+// has nothing to do with us any more.
+func UntrustCodexConfig(file string, entries []CodexTrustEntry, dryRun bool) (CodexTrustChange, error) {
+	change := CodexTrustChange{File: file}
+	original, err := readSnapshot(file)
+	if err != nil || !original.existed {
+		return change, err
+	}
+	doc, err := decodeTOML(original.raw)
+	if err != nil {
+		return change, fmt.Errorf("%s will not be modified: %w", file, err)
+	}
+
+	var tables [][]string
+	for _, entry := range entries {
+		table := []string{"hooks", "state", entry.Key}
+		if _, ok := lookupTOML(doc, append(slices.Clone(table), "trusted_hash")); !ok {
+			continue
+		}
+		tables = append(tables, table)
+		change.HooksRemoved = append(change.HooksRemoved, entry.Key)
+	}
+	if len(tables) == 0 || dryRun {
+		return change, nil
+	}
+
+	if _, err := backupOnce(file); err != nil {
+		return change, err
+	}
+	updated, _, err := removeTOMLTables(original.raw, tables)
+	if err != nil {
+		return change, err
+	}
+	return change, writeExpected(file, updated, original)
+}

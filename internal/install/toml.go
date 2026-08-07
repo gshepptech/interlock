@@ -243,3 +243,83 @@ func lineEnd(raw []byte, offset int) int {
 }
 
 func quoteTOMLKey(key string) string { return strconv.Quote(key) }
+
+// lineStart returns the offset of the first byte on the line containing offset.
+func lineStart(raw []byte, offset int) int {
+	for offset > 0 && raw[offset-1] != '\n' {
+		offset--
+	}
+	return offset
+}
+
+// removeTOMLTables deletes whole tables, header and body, by path.
+//
+// A table's body runs to the next table header, so the boundary is taken from
+// the document rather than guessed from blank lines: a hand-edited file may put
+// comments or spacing anywhere, and none of it should change which bytes belong
+// to which table.
+func removeTOMLTables(raw []byte, targets [][]string) ([]byte, int, error) {
+	if _, err := decodeTOML(raw); err != nil {
+		return nil, 0, err
+	}
+	want := map[string]bool{}
+	for _, target := range targets {
+		want[tomlPath(target)] = true
+	}
+
+	type header struct {
+		path  string
+		start int
+	}
+	var headers []header
+	var parser unstable.Parser
+	parser.Reset(raw)
+	for parser.NextExpression() {
+		expression := parser.Expression()
+		switch expression.Kind {
+		case unstable.Table, unstable.ArrayTable:
+			// A table expression carries no source range of its own, so the
+			// header is located from its first key part instead. Reading the
+			// zero-valued range put every cut at offset zero and removed
+			// nothing at all.
+			it := expression.Key()
+			if !it.Next() {
+				continue
+			}
+			headers = append(headers, header{
+				path:  tomlPath(nodeKey(expression)),
+				start: lineStart(raw, int(it.Node().Raw.Offset)),
+			})
+		}
+	}
+	if err := parser.Error(); err != nil {
+		return nil, 0, fmt.Errorf("parse TOML layout: %w", err)
+	}
+
+	var cuts []tomlEdit
+	for i, h := range headers {
+		if !want[h.path] {
+			continue
+		}
+		end := len(raw)
+		if i+1 < len(headers) {
+			end = headers[i+1].start
+		}
+		cuts = append(cuts, tomlEdit{start: h.start, end: end})
+	}
+	if len(cuts) == 0 {
+		return raw, 0, nil
+	}
+
+	// Back to front, so earlier offsets stay valid as later cuts are applied.
+	slices.SortFunc(cuts, func(a, b tomlEdit) int { return b.start - a.start })
+	updated := slices.Clone(raw)
+	for _, cut := range cuts {
+		updated = append(updated[:cut.start], updated[cut.end:]...)
+	}
+
+	if _, err := decodeTOML(updated); err != nil {
+		return nil, 0, fmt.Errorf("removing tables produced invalid TOML: %w", err)
+	}
+	return updated, len(cuts), nil
+}
