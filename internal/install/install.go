@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1075,4 +1076,52 @@ func UntrustCodexConfig(file string, entries []CodexTrustEntry, dryRun bool) (Co
 		return change, err
 	}
 	return change, writeExpected(file, updated, original)
+}
+
+// ForeignHooks lists hook commands in a target's file that this tool did not
+// write, newest first in file order.
+//
+// It exists for one caller: launching an agent with hook trust disabled. That
+// flag turns off the agent's own vetting of hook commands, which is the only
+// thing standing between a cloned repository and arbitrary execution. Interlock
+// can put that protection back by refusing to disable vetting for a file it
+// does not fully recognise, which makes the launcher safer than typing the flag
+// by hand.
+func ForeignHooks(t Target) ([]string, error) {
+	doc, existed, err := read(t.File)
+	if err != nil || !existed {
+		return nil, err
+	}
+	hooks, ok := doc["hooks"].(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+
+	var foreign []string
+	for _, event := range slices.Sorted(maps.Keys(hooks)) {
+		list, ok := hooks[event].([]any)
+		if !ok {
+			continue
+		}
+		for _, item := range list {
+			if owned, _, _ := ownedGroup(item, event, t.Agent); owned {
+				continue
+			}
+			group, ok := item.(map[string]any)
+			if !ok {
+				foreign = append(foreign, event+": unreadable hook entry")
+				continue
+			}
+			inner, _ := group["hooks"].([]any)
+			for _, h := range inner {
+				handler, ok := h.(map[string]any)
+				if !ok {
+					continue
+				}
+				command, _ := handler["command"].(string)
+				foreign = append(foreign, event+": "+command)
+			}
+		}
+	}
+	return foreign, nil
 }

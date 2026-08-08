@@ -15,8 +15,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gshepptech/interlock/internal/cleanup"
@@ -43,6 +45,7 @@ import (
 const usage = `interlock - keep coding agents out of each other's way
 
   interlock hook <event> <agent>   run as an agent hook (reads payload on stdin)
+  interlock codex [args...]        launch Codex so its hooks run and it is blocked
   interlock check <path>...        may I edit this? exit 0 free, 2 held
   interlock status                 show territory and who holds what
   interlock cleanup [--dry-run]    remove state belonging to expired sessions
@@ -81,6 +84,8 @@ func main() {
 	switch args[0] {
 	case "hook":
 		os.Exit(runHook(args[1:]))
+	case "codex":
+		os.Exit(runCodex(args[1:]))
 	case "check":
 		os.Exit(runCheck(args[1:]))
 	case "status":
@@ -1521,9 +1526,18 @@ func runCheck(args []string) int {
 		return allow("could not read claims: %v", err)
 	}
 
-	// An agent asking on its own behalf should not be told it is blocked by
-	// itself. Sessions set this when they call.
+	// An agent asking on its own behalf must not be told it is blocked by
+	// itself. Two things can identify the caller.
+	//
+	// A session id is exact, when the caller knows it. An agent name is the
+	// fallback and matters when hooks are also running: the hook claims the
+	// file a moment before the model runs this check, so without it the agent
+	// reads its own claim and refuses its own work. That happened in a live
+	// Codex session, which reported the file "held by another codex session"
+	// and declined. Where hooks are active they enforce contention between
+	// sessions anyway, so ignoring the caller's own agent here costs nothing.
 	own := os.Getenv("INTERLOCK_SESSION")
+	ownAgent := os.Getenv("INTERLOCK_AGENT")
 	team := os.Getenv(config.EnvTeam)
 
 	blocked := false
@@ -1536,10 +1550,14 @@ func runCheck(args []string) int {
 
 		var holder *lease.Lease
 		for _, l := range held {
-			if l.Path == relPath && l.SessionID != own {
-				holder = l
-				break
+			if l.Path != relPath {
+				continue
 			}
+			if l.SessionID == own || (ownAgent != "" && l.Agent == ownAgent) {
+				continue
+			}
+			holder = l
+			break
 		}
 		if holder != nil {
 			blocked = true
@@ -1569,4 +1587,113 @@ func runCheck(args []string) int {
 		return exitBlock
 	}
 	return exitOK
+}
+
+// codexBypassFlag makes Codex run hooks without the persisted trust it no
+// longer offers any way to grant.
+const codexBypassFlag = "--dangerously-bypass-hook-trust"
+
+// codexSearchPaths are where the binary has actually lived. Codex moved from
+// its own bundle into the ChatGPT app, so a single hard-coded path would have
+// broken silently the week it moved.
+var codexSearchPaths = []string{
+	"/Applications/ChatGPT.app/Contents/Resources/codex",
+	"/Applications/Codex.app/Contents/Resources/codex",
+}
+
+// runCodex launches Codex with hook trust disabled, so its hooks run and its
+// writes are blocked outright rather than relying on it to check first.
+//
+// Doing this by hand is a long path and a flag nobody remembers. Doing it here
+// also makes it safer: the flag disables Codex's vetting of hook commands, and
+// that vetting is the only thing standing between a cloned repository and
+// arbitrary execution, so this refuses to launch when the hooks file contains
+// anything Interlock did not write.
+func runCodex(args []string) int {
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot determine working directory: %v\n", err)
+		return 1
+	}
+	cfg, err := config.Load(cwd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+
+	var target install.Target
+	for _, candidate := range install.Plan(cfg.Root) {
+		if candidate.Agent == "codex" {
+			target = candidate
+		}
+	}
+	wired, err := install.Installed(target)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot read %s: %v\n", target.File, err)
+		return 1
+	}
+	if len(wired) == 0 {
+		fmt.Fprintf(os.Stderr,
+			"Interlock's hooks are not installed in this repository, so running "+
+				"Codex with trust disabled would gain nothing.\nRun: interlock init\n")
+		return 1
+	}
+
+	foreign, err := install.ForeignHooks(target)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot read %s: %v\n", target.File, err)
+		return 1
+	}
+	if len(foreign) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"Refusing to disable Codex's hook vetting.\n\n"+
+				"%s contains hooks Interlock did not write, and the flag this "+
+				"command passes would run them without review:\n\n", target.File)
+		for _, command := range foreign {
+			fmt.Fprintf(os.Stderr, "  %s\n", command)
+		}
+		fmt.Fprintf(os.Stderr,
+			"\nRemove them, or start Codex yourself if you know they are safe.\n")
+		return 1
+	}
+
+	binary, err := findCodex()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+
+	// Replace this process rather than wrapping it. Codex is interactive, and a
+	// parent sitting in the middle would have to forward the terminal, signals
+	// and exit status correctly to gain nothing.
+	argv := append([]string{binary, codexBypassFlag}, args...)
+	// Codex's hooks will be live, so its own claims must not make its own
+	// check refuse its own work.
+	env := append(os.Environ(), "INTERLOCK_AGENT=codex")
+	if err := syscall.Exec(binary, argv, env); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot start %s: %v\n", binary, err)
+		return 1
+	}
+	return 0
+}
+
+func findCodex() (string, error) {
+	if override := os.Getenv("INTERLOCK_CODEX_BIN"); override != "" {
+		if _, err := os.Stat(override); err == nil {
+			return override, nil
+		}
+		return "", fmt.Errorf("INTERLOCK_CODEX_BIN is set to %s, which does not exist", override)
+	}
+	if found, err := exec.LookPath("codex"); err == nil {
+		return found, nil
+	}
+	for _, candidate := range codexSearchPaths {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf(
+		"cannot find the codex binary. Looked on PATH and in %s.\n"+
+			"Set INTERLOCK_CODEX_BIN to its location.",
+		strings.Join(codexSearchPaths, ", "))
 }

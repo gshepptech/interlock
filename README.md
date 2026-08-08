@@ -78,8 +78,13 @@ Then open your agents and give them work. That is the whole setup.
 > refused to edit rather than working around it.
 >
 > That is cooperative rather than enforced. Claude Code's hooks still block
-> writes outright. Launching Codex with `--dangerously-bypass-hook-trust` gets
-> it the enforced path too, at the cost of starting it from a terminal.
+> writes outright.
+>
+> For the enforced path, start Codex with `interlock codex`. It passes the flag
+> that makes Codex run hooks without trust, so its writes are blocked outright
+> like Claude's. That flag also disables Codex's vetting of hook commands, so
+> the launcher refuses to run when `.codex/hooks.json` contains anything
+> Interlock did not write, which puts the protection back.
 
 ---
 
