@@ -70,34 +70,44 @@ interlock dashboard   # the panel, on 127.0.0.1:7717
 Then open your agents and give them work. That is the whole setup.
 
 > [!NOTE]
-> **Codex is coordinated through instructions, not hooks.** Codex requires hook
-> trust and, as of `codex-cli 0.146`, offers no way to grant it, so its hooks do
-> not run. Interlock therefore writes a short section into `AGENTS.md` telling
-> agents to run `interlock check <path>` before editing, and Codex follows it:
-> in a live session it ran the check, found a file held by Claude, retried, and
-> refused to edit rather than working around it.
+> **Codex is enforced, as of `codex-cli 0.147`.** Codex will not run a hook it
+> does not trust, and `interlock init` grants that trust by writing the hook's
+> hash into `~/.codex/config.toml` alongside the project's own trust entry.
+> Verified against a real session on `0.147.0-alpha.6.5`: Codex tried to write
+> a file another agent held, the `PreToolUse` hook refused it three times, and
+> the file was untouched.
 >
-> That is cooperative rather than enforced. Claude Code's hooks still block
-> writes outright.
+> This is a change. Earlier versions did not honour those entries, and the
+> instructions path below was the honest ceiling. The exact release that fixed
+> it is not established — only that `0.146` did not work and `0.147` does — so
+> `interlock doctor` reports whether hooks have actually fired here rather than
+> asking you to trust a version number.
 >
-> For the enforced path, start Codex with `interlock codex`. It passes the flag
-> that makes Codex run hooks without trust, so its writes are blocked outright
-> like Claude's. That flag also disables Codex's vetting of hook commands, so
-> the launcher refuses to run when `.codex/hooks.json` contains anything
-> Interlock did not write, which puts the protection back.
+> The `AGENTS.md` section stays, and is not redundant. In the same test with
+> the hooks live, Codex read it, ran `interlock check`, found the file held,
+> and waited rather than attempting the write at all. Being told beforehand is
+> better than being refused afterwards; the hook is what happens when it is not.
+>
+> `interlock codex` remains for older versions. It passes the flag that runs
+> hooks without trust, and because that flag also disables Codex's vetting of
+> hook commands, the launcher refuses to start when `.codex/hooks.json` holds
+> anything Interlock did not write. On 0.147 you do not need it.
 
 ---
 
 ## How it works
 
-Hooks where they can run, instructions where they cannot.
+Hooks to refuse, instructions to redirect.
 
-A hook fires whether or not the model cooperates, which is why it is the first
-choice and why Claude Code writes are genuinely blocked. Codex will not run
-hooks without trust it no longer grants, so it is reached the other way: the
-repository's instructions tell it to check before editing, and it does. That
-depends on the model cooperating, and it is the honest ceiling for an agent that
-cannot be intercepted.
+A hook fires whether or not the model cooperates, which is why both agents'
+writes are genuinely blocked. But a refusal is a poor way to be told something:
+by the time it arrives the agent has already decided what to do and has to
+work out why it failed. So the repository's instructions tell an agent to run
+`interlock check` before it edits, and both agents do — they find the file held
+and go elsewhere without ever attempting the write.
+
+The instructions are how an agent finds out. The hook is what happens when it
+does not ask.
 
 ```mermaid
 sequenceDiagram
@@ -160,7 +170,7 @@ will not signal a process it can no longer prove is the right one.
 |---|---|---|
 | **Awareness** | Needs no rules, does most of the work | Each agent is told who else is live and which directories they are working in. An agent that knows where its peer is usually stays out of the way without ever being refused anything. |
 | **Claims** | The backstop | Writing a file claims it for 90 seconds, renewed on every touch, released when the session ends. A second agent is refused and told who has it. |
-| **Instructions** | For agents whose hooks cannot run | `AGENTS.md` carries one rule: run `interlock check <path>` before editing, and treat exit 2 as a scheduling conflict rather than a permission one. Cooperative, but a live Codex session followed it, retried, and refused to work around a held file. |
+| **Instructions** | So an agent can find out before it is refused | `AGENTS.md` carries one rule: run `interlock check <path>` before editing, and treat exit 2 as a scheduling conflict rather than a permission one. A live Codex session followed it — checked, found the file held, waited, and never attempted the write. That is cooperative, and the claim above is what happens when an agent does not ask. |
 | **Verification** | For what cannot be judged in advance | `python3 build.py` writes somewhere and nothing before it runs says where. The tree is snapshotted either side of the command, and anything that landed out of bounds is reported back to the agent, which can then revert it. |
 
 <details>

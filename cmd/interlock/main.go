@@ -121,6 +121,37 @@ func main() {
 	}
 }
 
+// dumpPayload appends the raw hook payload to a file when INTERLOCK_HOOK_DUMP
+// names one.
+//
+// Every vendor-specific bug this tool has had began with an envelope changing
+// shape, and the only way to see one is to catch it in flight: a hook runs
+// inside the agent's process tree, with the agent's stdin, and cannot be
+// reproduced by hand. The fixtures in internal/hookio/testdata all came from a
+// capture like this, and the next one will too.
+//
+// It writes to a path the operator chose, and never fails the hook: a debugging
+// aid that could stop someone's work would be worse than no aid at all.
+func dumpPayload(agent hookio.Agent, event string, raw []byte) {
+	path := os.Getenv("INTERLOCK_HOOK_DUMP")
+	if path == "" {
+		return
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	record, err := json.Marshal(map[string]any{
+		"at": time.Now().UTC().Format(time.RFC3339Nano), "agent": agent,
+		"event": event, "payload": json.RawMessage(raw),
+	})
+	if err != nil {
+		return
+	}
+	file.Write(append(record, '\n'))
+}
+
 // runHook is the hot path. Its one hard rule: this tool must never be the reason
 // someone's work stopped. A territory violation and a held lease are the only
 // things that block. Anything else that goes wrong, a payload we cannot read, a
@@ -139,6 +170,7 @@ func runHook(args []string) int {
 	if err != nil {
 		return allow("could not read hook payload: %v", err)
 	}
+	dumpPayload(agent, event, raw)
 
 	ev, err := hookio.Parse(agent, raw)
 	if err != nil {

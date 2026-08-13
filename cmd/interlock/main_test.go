@@ -1166,3 +1166,58 @@ func cliEnv(t *testing.T, dir string, env []string, args ...string) result {
 	}
 	return res
 }
+
+// Every vendor-specific bug this tool has had began with an envelope changing
+// shape, and a hook payload cannot be reproduced by hand: it arrives on stdin
+// inside the agent's own process tree. This is how the next one gets caught.
+func TestHookPayloadsCanBeCapturedForDiagnosis(t *testing.T) {
+	dir := repo(t, defaultConfig)
+	dump := filepath.Join(t.TempDir(), "payloads.jsonl")
+
+	payload := `{"session_id":"s1","cwd":"` + dir +
+		`","hook_event_name":"PreToolUse","tool_name":"Write",` +
+		`"tool_input":{"file_path":"` + dir + `/src/api/users.go","content":"x"}}`
+	cmd := exec.Command(binPath, "hook", "PreToolUse", "claude")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "HOME="+dir, "INTERLOCK_HOOK_DUMP="+dump)
+	cmd.Stdin = strings.NewReader(payload)
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("run hook: %v", err)
+		}
+	}
+
+	raw, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatalf("read dump: %v", err)
+	}
+	var record struct {
+		At      string          `json:"at"`
+		Agent   string          `json:"agent"`
+		Event   string          `json:"event"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &record); err != nil {
+		t.Fatalf("parse dump %q: %v", raw, err)
+	}
+	if record.Agent != "claude" || record.Event != "PreToolUse" || record.At == "" {
+		t.Fatalf("record = %#v", record)
+	}
+	// The payload is kept exactly as it arrived. A capture that reformatted it
+	// would be useless for finding out what an agent actually sent.
+	if string(record.Payload) != payload {
+		t.Fatalf("payload = %s\nwant %s", record.Payload, payload)
+	}
+
+	// Nothing is written when nobody asked for it.
+	quiet := exec.Command(binPath, "hook", "PreToolUse", "claude")
+	quiet.Dir = dir
+	quiet.Env = append(os.Environ(), "HOME="+dir)
+	quiet.Stdin = strings.NewReader(payload)
+	quiet.Run()
+	entries, err := os.ReadDir(filepath.Dir(dump))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("dump directory holds %d files, want 1 (err=%v)", len(entries), err)
+	}
+}
