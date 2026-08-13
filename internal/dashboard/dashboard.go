@@ -22,6 +22,7 @@ import (
 	"github.com/gshepptech/interlock/internal/config"
 	"github.com/gshepptech/interlock/internal/journal"
 	"github.com/gshepptech/interlock/internal/lease"
+	"github.com/gshepptech/interlock/internal/managedrun"
 	"github.com/gshepptech/interlock/internal/session"
 )
 
@@ -31,6 +32,7 @@ type View struct {
 	Root        string
 	Teams       []TeamView
 	Sessions    []SessionView
+	Runs        []RunView
 	Leases      []LeaseView
 	Events      []EventView
 	Prevented   int
@@ -38,6 +40,38 @@ type View struct {
 	GeneratedAt string
 	RefreshSecs int
 	Warning     string
+}
+
+// RunView is an agent Interlock started.
+//
+// It is kept apart from SessionView because the two are different kinds of
+// claim. A session is what hook events let us infer about an agent that turned
+// up; a run is a process Interlock owns, whose state it knows. Merging them
+// would mean picking one vocabulary for both, and whichever was picked would
+// overstate one of them.
+type RunView struct {
+	ID      string
+	ShortID string
+	State   string
+	// Describe is the sentence a person reads: the state plus the detail that
+	// makes it actionable, such as the exit code or that force is required.
+	Describe string
+	Runner   string
+	Name     string
+	Model    string
+	Team     string
+	Dir      string
+	Age      string
+	Duration string
+	Summary  string
+	RetryOf  string
+	// Live marks a run with a process behind it, which is what decides whether
+	// lifecycle controls mean anything.
+	Live          bool
+	Paused        bool
+	Stopping      bool
+	ForceRequired bool
+	Terminal      bool
 }
 
 type TeamView struct {
@@ -70,6 +104,24 @@ type SessionView struct {
 	// of the repo" and "what exactly" answer different questions.
 	Latest *TouchView
 	Holds  int
+	// RunID is set when Interlock started this agent. Everything else on this
+	// page is inferred from hook events; this is the one field that says the
+	// process is ours, and it comes from the environment the supervisor built
+	// rather than from anything the agent could claim.
+	RunID string
+}
+
+// Managed reports whether Interlock launched this agent.
+func (s SessionView) Managed() bool { return s.RunID != "" }
+
+// Origin is the word shown beside a session. The distinction is load-bearing:
+// an observed agent can be watched and blocked but never paused or stopped,
+// because Interlock does not own its process.
+func (s SessionView) Origin() string {
+	if s.Managed() {
+		return "managed"
+	}
+	return "observed"
 }
 
 // Aspect is an agent's current state, named for the signal it would be showing.
@@ -127,6 +179,34 @@ type LeaseView struct {
 	ShortID string
 }
 
+// RunViews renders the runs Interlock started.
+//
+// Every field here is a fact from the run record. Nothing is inferred from
+// recency the way a session's aspect is, because for these processes there is
+// nothing to infer: a supervisor either answered for the run or the run is
+// marked lost, and both are decided before the page is built.
+func RunViews(records []managedrun.Record, now time.Time) []RunView {
+	views := make([]RunView, 0, len(records))
+	for _, record := range records {
+		state := record.Status.State
+		views = append(views, RunView{
+			ID: record.ID(), ShortID: short(record.ID()),
+			State: string(state), Describe: record.Describe(),
+			Runner: string(record.Runner()), Name: record.Label(),
+			Model: record.Spec.Options.Model, Team: record.Spec.Options.Team,
+			Dir: record.Spec.Options.Dir(), Age: since(now, record.Spec.CreatedAt),
+			Duration: duration(record.Duration(now)), Summary: record.Status.Summary,
+			RetryOf:       record.Spec.RetryOf,
+			Live:          state.Live(),
+			Paused:        state == managedrun.Paused,
+			Stopping:      state == managedrun.Stopping,
+			ForceRequired: record.Status.ForceRequired,
+			Terminal:      state.Terminal(),
+		})
+	}
+	return views
+}
+
 // Build assembles the view. It takes already-loaded state rather than reading it
 // so the assembly is testable without a repo on disk.
 func Build(cfg *config.Config, sessions []*session.Session, leases []*lease.Lease,
@@ -179,6 +259,7 @@ func Build(cfg *config.Config, sessions []*session.Session, leases []*lease.Leas
 			ShortID:  short(s.ID),
 			Holds:    holdsBySession[s.ID],
 			Aspect:   Proceeding,
+			RunID:    s.RunID,
 		}
 		switch s.ObservationAt(now) {
 		case session.Ended:

@@ -353,6 +353,31 @@ func runsUsageError() int {
 	return exitUsage
 }
 
+// noteRunBlocked records that a hook refused a write from a managed run.
+//
+// This is the only way a run reaches the blocked state, and the correlation is
+// the whole reason it can be trusted: the refusal came from Interlock's own
+// hook, running inside a process Interlock started, carrying the run's own
+// identifier. Matching words in an agent's output would be a guess, and a state
+// that means "we think something looks stuck" is worse than no state at all.
+//
+// Failures are ignored on purpose. This runs on the hook path, where the rule
+// is that bookkeeping must never be the reason someone's work stopped.
+func noteRunBlocked(root, detail string) {
+	id := managedRunID()
+	if id == "" {
+		return
+	}
+	store := managedrun.Open(root)
+	record, err := store.Load(id)
+	if err != nil {
+		return
+	}
+	store.Transition(id, record.Spec.Generation, managedrun.Blocked, func(status *managedrun.Status) {
+		status.Summary = detail
+	})
+}
+
 func newRunService() (runcontrol.Service, error) {
 	root, err := currentRoot()
 	if err != nil {

@@ -68,7 +68,16 @@ type Session struct {
 	Started  time.Time `json:"started"`
 	LastSeen time.Time `json:"last_seen"`
 	Recent   []Touch   `json:"recent,omitempty"`
+	// RunID links this session to a run Interlock launched. It is set from the
+	// environment the supervisor gave the agent, so it is present exactly when
+	// Interlock owns the process and absent for every session it merely
+	// observes. Nothing else may be used to make that distinction.
+	RunID string `json:"run_id,omitempty"`
 }
+
+// Managed reports whether Interlock launched the agent behind this session, as
+// opposed to having noticed it through a hook.
+func (s *Session) Managed() bool { return s.RunID != "" }
 
 // Idle reports whether the session has gone quiet for long enough to be treated
 // as gone.
@@ -102,12 +111,29 @@ func open(root string, now func() time.Time) (*Store, error) {
 	return &Store{dir: dir, now: now}, nil
 }
 
+// Sighting is what one hook event knows about the session it came from.
+// Fields are filled in as they become available; an empty one never overwrites
+// something already known.
+type Sighting struct {
+	Agent string
+	Team  string
+	Model string
+	CWD   string
+	RunID string
+}
+
 // Seen records that a session is alive, creating it on first sight.
 //
 // There is no separate register step because SessionStart is not guaranteed to
 // have fired: hooks can be installed mid-session, and a session that has been
 // resumed may never send one. Any event is enough to know someone is there.
 func (s *Store) Seen(id, agent, team, model, cwd string) error {
+	return s.See(id, Sighting{Agent: agent, Team: team, Model: model, CWD: cwd})
+}
+
+// See is Seen with everything an event may carry, including the run this
+// session belongs to when Interlock started it.
+func (s *Store) See(id string, sighting Sighting) error {
 	if id == "" {
 		return errors.New("session id is required")
 	}
@@ -128,10 +154,11 @@ func (s *Store) Seen(id, agent, team, model, cwd string) error {
 	// Later events carry better information than the first: a team may be
 	// resolved from the environment, a model may only appear on some events.
 	// Never overwrite something known with something empty.
-	cur.Agent = preferNonEmpty(agent, cur.Agent)
-	cur.Team = preferNonEmpty(team, cur.Team)
-	cur.Model = preferNonEmpty(model, cur.Model)
-	cur.CWD = preferNonEmpty(cwd, cur.CWD)
+	cur.Agent = preferNonEmpty(sighting.Agent, cur.Agent)
+	cur.Team = preferNonEmpty(sighting.Team, cur.Team)
+	cur.Model = preferNonEmpty(sighting.Model, cur.Model)
+	cur.CWD = preferNonEmpty(sighting.CWD, cur.CWD)
+	cur.RunID = preferNonEmpty(sighting.RunID, cur.RunID)
 	return s.write(cur)
 }
 

@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,12 +23,23 @@ import (
 	"github.com/gshepptech/interlock/internal/dashboard"
 	"github.com/gshepptech/interlock/internal/diagnostic"
 	"github.com/gshepptech/interlock/internal/handoffrequest"
+	"github.com/gshepptech/interlock/internal/managedrun"
+	"github.com/gshepptech/interlock/internal/runcontrol"
+	"github.com/gshepptech/interlock/internal/runner"
 )
 
 const (
-	maxBody     = 8 * 1024
-	maxFlashes  = 64
-	flashExpiry = time.Minute
+	maxBody = 8 * 1024
+	// maxStartBody is the one larger envelope, and it exists for exactly one
+	// field: the prompt a run starts with. Everything else on this surface is
+	// identifiers and enums, which is why the general limit stays small.
+	maxStartBody = 64 * 1024
+	maxPrompt    = 32 * 1024
+	maxFlashes   = 64
+	flashExpiry  = time.Minute
+	// maxLogBytes bounds one log fragment. The page polls, so this is a
+	// per-refresh budget rather than a limit on what can be read.
+	maxLogBytes = 64 * 1024
 )
 
 type Controller interface {
@@ -40,6 +52,21 @@ type Controller interface {
 	ResolveHandoff(context.Context, control.Actor, string, string) (control.Result, error)
 }
 
+// RunController is the managed-run half of the control surface. It is a
+// separate interface, and optional, because a dashboard serving a repository
+// where nothing was ever launched should not offer controls for processes that
+// do not exist.
+type RunController interface {
+	Launch(context.Context, control.Actor, runcontrol.Start) (runcontrol.Result, error)
+	Pause(context.Context, control.Actor, string, string) (runcontrol.Result, error)
+	Resume(context.Context, control.Actor, string) (runcontrol.Result, error)
+	Stop(context.Context, control.Actor, string, string) (runcontrol.Result, error)
+	ForceStop(context.Context, control.Actor, string, string) (runcontrol.Result, error)
+	Retry(context.Context, control.Actor, string, string) (runcontrol.Result, error)
+	Logs(context.Context, string, managedrun.Stream, managedrun.Cursor, int64) (
+		managedrun.LogChunk, managedrun.Cursor, error)
+}
+
 type Load func() (dashboard.View, []handoffrequest.Item, error)
 
 type flash struct {
@@ -49,6 +76,7 @@ type flash struct {
 
 type Server struct {
 	controller Controller
+	runs       RunController
 	load       Load
 	authority  string
 	csrf       string
@@ -79,6 +107,10 @@ func New(controller Controller, authority string, load Load) (*Server, error) {
 
 func (s *Server) CSRFToken() string { return s.csrf }
 
+// AddRuns registers the managed-run routes. Without it those paths do not
+// exist, rather than existing and refusing.
+func (s *Server) AddRuns(controller RunController) { s.runs = controller }
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.setBaseHeaders(w)
 	nonce, err := randomToken(18)
@@ -97,6 +129,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.servePage(w, r, nonce)
 	case r.URL.Path == "/api/status" && r.Method == http.MethodGet:
 		s.serveStatus(w, nonce)
+	case strings.HasPrefix(r.URL.Path, "/api/runs/"):
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.serveRunLog(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/actions/"):
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -142,7 +181,66 @@ func (s *Server) serveStatus(w http.ResponseWriter, nonce string) {
 type actionSpec struct {
 	required []string
 	optional []string
-	run      func(context.Context, url.Values) (control.Result, error)
+	// limit overrides the request body budget. Only the launcher needs a larger
+	// one, and only because of the prompt.
+	limit int64
+	run   func(context.Context, url.Values) (control.Result, error)
+}
+
+// serveRunLog returns a bounded, escaped fragment of one stream.
+//
+// It returns HTML rather than the file, which is the point: the bytes came out
+// of a language model, and everything between the file and the page — the
+// bound, the escape-sequence stripping, the redaction, the HTML escaping — is
+// applied here rather than trusted to the caller.
+func (s *Server) serveRunLog(w http.ResponseWriter, r *http.Request) {
+	if s.runs == nil {
+		http.NotFound(w, r)
+		return
+	}
+	rest, ok := strings.CutPrefix(r.URL.Path, "/api/runs/")
+	id, tail, found := strings.Cut(rest, "/")
+	if !ok || !found || tail != "logs" || !managedrun.ValidID(id) {
+		http.NotFound(w, r)
+		return
+	}
+	query := r.URL.Query()
+	for key := range query {
+		if key != "stream" && key != "bytes" {
+			http.Error(w, "unexpected query parameter", http.StatusBadRequest)
+			return
+		}
+	}
+	stream := managedrun.Stdout
+	switch query.Get("stream") {
+	case "", "stdout":
+	case "stderr":
+		stream = managedrun.Stderr
+	default:
+		http.Error(w, "unknown stream", http.StatusBadRequest)
+		return
+	}
+	limit := int64(maxLogBytes)
+	if raw := query.Get("bytes"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed <= 0 {
+			http.Error(w, "bytes must be a positive number", http.StatusBadRequest)
+			return
+		}
+		limit = min(parsed, maxLogBytes)
+	}
+
+	chunk, _, err := s.runs.Logs(r.Context(), id, stream, managedrun.Cursor{}, limit)
+	if err != nil {
+		http.Error(w, "cannot read run output", statusFor(err))
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = dashboard.RenderRunLog(w, dashboard.RunLogView{
+		RunID: id, Stream: string(stream),
+		Text:      managedrun.Redact(chunk.Text(), nil),
+		Truncated: chunk.Truncated,
+	})
 }
 
 func (s *Server) serveAction(w http.ResponseWriter, r *http.Request) {
@@ -155,7 +253,7 @@ func (s *Server) serveAction(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	values, status, err := parseForm(w, r, spec.required, spec.optional)
+	values, status, err := parseForm(w, r, spec)
 	if err != nil {
 		http.Error(w, err.Error(), status)
 		return
@@ -228,17 +326,90 @@ func (s *Server) action(path string) (actionSpec, bool) {
 		return actionSpec{required: append(csrf, "request_id", "confirmation"), run: func(ctx context.Context, v url.Values) (control.Result, error) {
 			return s.controller.ResolveHandoff(ctx, control.ActorDashboard, v.Get("request_id"), v.Get("confirmation"))
 		}}, true
-	default:
+	}
+	return s.runAction(path)
+}
+
+// runAction is the managed-run half of the route table.
+//
+// Nothing here accepts a command, an executable, a signal, a process id, a
+// socket path or a log path. A launch names a runner from a closed set and a
+// few labels; every other action names a run and repeats its identifier back.
+// That is the whole surface, and it is small on purpose: this server is
+// reachable by anything running on the machine that can get past the origin and
+// token checks, and the blast radius of a mistake here is somebody's repository.
+func (s *Server) runAction(path string) (actionSpec, bool) {
+	if s.runs == nil {
 		return actionSpec{}, false
+	}
+	csrf := []string{"csrf"}
+	lifecycle := func(action func(context.Context, control.Actor, string, string) (runcontrol.Result, error)) actionSpec {
+		return actionSpec{
+			required: append(csrf, "run_id", "confirmation"),
+			run: func(ctx context.Context, v url.Values) (control.Result, error) {
+				result, err := action(ctx, control.ActorDashboard, v.Get("run_id"), v.Get("confirmation"))
+				return fromRun(result), err
+			},
+		}
+	}
+	switch path {
+	case "/api/actions/run-start":
+		return actionSpec{
+			required: csrf, optional: []string{"runner", "name", "model", "team", "cwd", "prompt"},
+			limit: maxStartBody,
+			run: func(ctx context.Context, v url.Values) (control.Result, error) {
+				result, err := s.runs.Launch(ctx, control.ActorDashboard, runcontrol.Start{
+					Options: runner.Options{
+						Runner: runner.Name(v.Get("runner")), Name: v.Get("name"),
+						Model: v.Get("model"), Team: v.Get("team"), WorkingDir: v.Get("cwd"),
+					},
+					Prompt: v.Get("prompt"),
+				})
+				return fromRun(result), err
+			},
+		}, true
+	case "/api/actions/run-pause":
+		return lifecycle(s.runs.Pause), true
+	case "/api/actions/run-stop":
+		return lifecycle(s.runs.Stop), true
+	case "/api/actions/run-force-stop":
+		return lifecycle(s.runs.ForceStop), true
+	case "/api/actions/run-retry":
+		return lifecycle(s.runs.Retry), true
+	case "/api/actions/run-resume":
+		return actionSpec{
+			required: append(csrf, "run_id"),
+			run: func(ctx context.Context, v url.Values) (control.Result, error) {
+				result, err := s.runs.Resume(ctx, control.ActorDashboard, v.Get("run_id"))
+				return fromRun(result), err
+			},
+		}, true
+	}
+	return actionSpec{}, false
+}
+
+// fromRun narrows a run result to what the HTTP envelope needs. The run record
+// itself is deliberately not carried across: this layer redirects to a page
+// that reads the state fresh, rather than rendering a copy that was true one
+// request ago.
+func fromRun(result runcontrol.Result) control.Result {
+	return control.Result{
+		Action: result.Action, Outcome: result.Outcome, Target: result.Target,
+		Message: result.Message, Warning: result.Warning,
 	}
 }
 
-func parseForm(w http.ResponseWriter, r *http.Request, required, optional []string) (url.Values, int, error) {
+func parseForm(w http.ResponseWriter, r *http.Request, spec actionSpec) (url.Values, int, error) {
+	required, optional := spec.required, spec.optional
 	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/x-www-form-urlencoded" || len(params) != 0 {
 		return nil, http.StatusUnsupportedMediaType, errors.New("unsupported content type")
 	}
-	body := http.MaxBytesReader(w, r.Body, maxBody)
+	limit := int64(maxBody)
+	if spec.limit > 0 {
+		limit = spec.limit
+	}
+	body := http.MaxBytesReader(w, r.Body, limit)
 	raw, err := io.ReadAll(body)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -301,8 +472,44 @@ func validateActionFields(path string, values url.Values) error {
 		if !safeIdentifier(values.Get("request_id"), 128) {
 			return errors.New("invalid handoff request id")
 		}
+	case "/api/actions/run-start":
+		if !runner.Name(values.Get("runner")).Known() {
+			return errors.New("unknown runner")
+		}
+		for field, max := range map[string]int{"name": 64, "model": 64, "team": 64} {
+			if value := values.Get(field); value != "" && !safeIdentifier(value, max) {
+				return errors.New("invalid " + field)
+			}
+		}
+		if dir := values.Get("cwd"); dir != "" && !safeRelativeDir(dir) {
+			return errors.New("invalid working directory")
+		}
+		prompt := values.Get("prompt")
+		if strings.TrimSpace(prompt) == "" || len(prompt) > maxPrompt || !utf8.ValidString(prompt) {
+			return errors.New("invalid prompt")
+		}
+	case "/api/actions/run-pause", "/api/actions/run-resume", "/api/actions/run-stop",
+		"/api/actions/run-force-stop", "/api/actions/run-retry":
+		if !managedrun.ValidID(values.Get("run_id")) {
+			return errors.New("invalid run id")
+		}
 	}
 	return nil
+}
+
+// safeRelativeDir accepts a path inside the repository, judged on syntax alone.
+// Whether it exists, and whether it stays inside once symlinks are resolved, is
+// settled deeper down where the filesystem can be consulted.
+func safeRelativeDir(dir string) bool {
+	if len(dir) > 512 || strings.ContainsAny(dir, "\x00\\") || strings.HasPrefix(dir, "/") {
+		return false
+	}
+	for segment := range strings.SplitSeq(dir, "/") {
+		if segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func safeIdentifier(value string, max int) bool {

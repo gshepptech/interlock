@@ -12,7 +12,10 @@ import (
 	"github.com/gshepptech/interlock/internal/config"
 	"github.com/gshepptech/interlock/internal/journal"
 	"github.com/gshepptech/interlock/internal/lease"
+	"github.com/gshepptech/interlock/internal/managedrun"
+	"github.com/gshepptech/interlock/internal/runner"
 	"github.com/gshepptech/interlock/internal/session"
+	"github.com/gshepptech/interlock/internal/territory"
 )
 
 func loadConfig(t *testing.T, body string) *config.Config {
@@ -363,5 +366,70 @@ func TestEmptyFeedExplainsTheAmbiguity(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "doctor") {
 		t.Error("an empty feed does not point at doctor, so a broken install looks like a quiet one")
+	}
+}
+
+// A session Interlock started and a session it merely noticed are different
+// claims, and the page has to keep them apart: an observed agent can be watched
+// and blocked but never paused or stopped, because Interlock does not own it.
+func TestSessionsSayWhetherInterlockStartedThem(t *testing.T) {
+	now := time.Now()
+	cfg := &config.Config{Root: "/repo", Map: &territory.Map{}}
+	sessions := []*session.Session{
+		{ID: "observed-1", Agent: "claude", LastSeen: now},
+		{ID: "managed-1", Agent: "codex", LastSeen: now, RunID: "run-0123456789abcdef01234567"},
+	}
+	view := Build(cfg, sessions, nil, nil, now)
+	if len(view.Sessions) != 2 {
+		t.Fatalf("sessions = %#v", view.Sessions)
+	}
+	if view.Sessions[0].Managed() || view.Sessions[0].Origin() != "observed" {
+		t.Errorf("first session = %#v", view.Sessions[0])
+	}
+	if !view.Sessions[1].Managed() || view.Sessions[1].Origin() != "managed" {
+		t.Errorf("second session = %#v", view.Sessions[1])
+	}
+}
+
+func TestRunViewsReportTheRecordRatherThanInferAnything(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	code := 2
+	records := []managedrun.Record{
+		{
+			Spec: managedrun.Spec{
+				ID: "run-0123456789abcdef01234567", CreatedAt: now.Add(-2 * time.Minute),
+				Options: runner.Options{Runner: runner.Codex, Name: "api", Model: "a-model"},
+			},
+			Status: managedrun.Status{State: managedrun.Paused, StartedAt: now.Add(-90 * time.Second)},
+		},
+		{
+			Spec: managedrun.Spec{
+				ID: "run-89abcdef0123456789abcdef", CreatedAt: now.Add(-time.Hour),
+				Options: runner.Options{Runner: runner.Claude}, RetryOf: "run-0123456789abcdef01234567",
+			},
+			Status: managedrun.Status{
+				State: managedrun.Failed, ExitCode: &code,
+				StartedAt: now.Add(-time.Hour), EndedAt: now.Add(-59 * time.Minute),
+			},
+		},
+	}
+	views := RunViews(records, now)
+	if len(views) != 2 {
+		t.Fatalf("views = %#v", views)
+	}
+	if !views[0].Live || !views[0].Paused || views[0].Terminal {
+		t.Errorf("paused run = %#v", views[0])
+	}
+	if views[0].Name != "api" || views[0].Runner != "codex" || views[0].Dir != "." {
+		t.Errorf("paused run = %#v", views[0])
+	}
+	if !views[1].Terminal || views[1].Live {
+		t.Errorf("failed run = %#v", views[1])
+	}
+	if views[1].Describe != "failed with exit code 2" {
+		t.Errorf("describe = %q", views[1].Describe)
+	}
+	if views[1].RetryOf != "run-0123456789abcdef01234567" {
+		t.Errorf("retry of = %q", views[1].RetryOf)
 	}
 }

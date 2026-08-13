@@ -34,6 +34,7 @@ import (
 	"github.com/gshepptech/interlock/internal/instructions"
 	"github.com/gshepptech/interlock/internal/journal"
 	"github.com/gshepptech/interlock/internal/lease"
+	"github.com/gshepptech/interlock/internal/managedrun"
 	"github.com/gshepptech/interlock/internal/observed"
 	"github.com/gshepptech/interlock/internal/remedy"
 	"github.com/gshepptech/interlock/internal/session"
@@ -271,6 +272,8 @@ func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.
 				SessionID: ev.SessionID, Path: rel(cfg.Root, file),
 				Detail: fmt.Sprintf("belongs to %q, matched %q", owner, pattern),
 			})
+			noteRunBlocked(cfg.Root, fmt.Sprintf("blocked: %s belongs to the %s team",
+				rel(cfg.Root, file), owner))
 			fmt.Fprintf(os.Stderr,
 				"Blocked by interlock: %s belongs to the %q team (matched %q), "+
 					"and you are on %q. Another agent may be working there right now. "+
@@ -308,6 +311,8 @@ func checkWrite(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.
 				Detail: fmt.Sprintf("%s had it, %s ago", current.Agent,
 					time.Since(current.Acquired).Round(time.Second)),
 			})
+			noteRunBlocked(cfg.Root, fmt.Sprintf("blocked: %s is held by %s",
+				relPath, current.Agent))
 			fmt.Fprintf(os.Stderr,
 				"Blocked by interlock: %s This is a timing conflict, not a "+
 					"permission one: work on something else and come back to it. "+
@@ -375,7 +380,25 @@ func note(cfg *config.Config, ev *hookio.Event, team string, agent hookio.Agent)
 	if err != nil {
 		return
 	}
-	store.Seen(ev.SessionID, string(agent), team, ev.Model, ev.CWD)
+	store.See(ev.SessionID, session.Sighting{
+		Agent: string(agent), Team: team, Model: ev.Model, CWD: ev.CWD,
+		RunID: managedRunID(),
+	})
+}
+
+// managedRunID reports the run this hook belongs to, when Interlock started the
+// agent that fired it.
+//
+// The value comes from the environment the supervisor built, so it is present
+// exactly when Interlock owns the process. It is validated rather than trusted:
+// the variable is inherited by everything the agent spawns, and an agent can
+// set environment variables itself.
+func managedRunID() string {
+	id := os.Getenv("INTERLOCK_RUN_ID")
+	if !managedrun.ValidID(id) {
+		return ""
+	}
+	return id
 }
 
 // recordTouches remembers the files a session just wrote, so the dashboard can
@@ -1025,6 +1048,12 @@ func runDashboard(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	runs, err := newRunService()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	handler.AddRuns(runs)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -1057,7 +1086,15 @@ func dashboardLoad(cfg *config.Config) controlhttp.Load {
 		if err != nil {
 			return dashboard.View{}, nil, err
 		}
-		return dashboard.Build(cfg, sessions, leases, readEvents(cfg), time.Now()), requests, nil
+		now := time.Now()
+		view := dashboard.Build(cfg, sessions, leases, readEvents(cfg), now)
+		// Reconciling here means the page never shows a run as live on the
+		// strength of a record alone; if no supervisor answers, it is marked
+		// lost before anyone sees a control for it.
+		if records, err := managedrun.Open(cfg.Root).Reconcile(); err == nil {
+			view.Runs = dashboard.RunViews(records, now)
+		}
+		return view, requests, nil
 	}
 }
 

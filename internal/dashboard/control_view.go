@@ -6,6 +6,7 @@ import (
 
 	"github.com/gshepptech/interlock/internal/diagnostic"
 	"github.com/gshepptech/interlock/internal/handoffrequest"
+	"github.com/gshepptech/interlock/internal/runner"
 )
 
 type ControlView struct {
@@ -15,6 +16,7 @@ type ControlView struct {
 	Flash    string
 	Requests []RequestView
 	Checks   []CheckView
+	Runners  []string
 }
 
 type RequestView struct {
@@ -35,7 +37,7 @@ type CheckView struct {
 
 func Controls(view View, csrf, nonce, flash string, requests []handoffrequest.Item,
 	report *diagnostic.Report) ControlView {
-	out := ControlView{View: view, CSRF: csrf, Nonce: nonce, Flash: flash}
+	out := ControlView{View: view, CSRF: csrf, Nonce: nonce, Flash: flash, Runners: Runners()}
 	for _, item := range requests {
 		out.Requests = append(out.Requests, RequestView{
 			ID: item.Request.ID, Source: item.Request.SourceSession,
@@ -54,8 +56,33 @@ func Controls(view View, csrf, nonce, flash string, requests []handoffrequest.It
 	return out
 }
 
+// RunLogView is a bounded piece of one run's output, on its way to a page.
+type RunLogView struct {
+	RunID     string
+	Stream    string
+	Text      string
+	Truncated bool
+}
+
+// Runners are the agents the launcher offers. The list is the closed set the
+// server validates against, so the form cannot offer something the service
+// would refuse.
+func Runners() []string {
+	names := make([]string, 0, len(runner.Names()))
+	for _, name := range runner.Names() {
+		names = append(names, string(name))
+	}
+	return names
+}
+
 func RenderControlPage(w io.Writer, view ControlView) error {
 	return controlTemplates.ExecuteTemplate(w, "page", view)
+}
+
+// RenderRunLog writes the log fragment. The text is escaped by the template,
+// which is the last line of a defence that started when the bytes were read.
+func RenderRunLog(w io.Writer, view RunLogView) error {
+	return controlTemplates.ExecuteTemplate(w, "runlog", view)
 }
 
 func RenderControlStatus(w io.Writer, view ControlView) error {
@@ -112,17 +139,58 @@ var controlTemplates = template.Must(template.New("control").Parse(`
 {{if .Flash}}<p class="flash" role="status">{{.Flash}}</p>{{end}}
 <section class="indications">
   <div class="ind"><b>{{len .Sessions}}</b><span>Sessions</span></div>
+  <div class="ind"><b>{{len .Runs}}</b><span>Runs</span></div>
   <div class="ind"><b>{{len .Leases}}</b><span>Files held</span></div>
   <div class="ind"><b>{{len .Requests}}</b><span>Handoffs</span></div>
   <div class="ind"><b>{{.Prevented}}</b><span>Collisions stopped</span></div>
 </section>
 {{if .Warning}}<p class="flash warn">{{.Warning}}</p>{{end}}
 
+<h2>Runs</h2>
+<div class="doctor control-only"><details><summary>Start an agent</summary>
+<form method="post" action="/api/actions/run-start">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <select name="runner" aria-label="Runner">{{range .Runners}}<option value="{{.}}">{{.}}</option>{{end}}</select>
+  <input name="name" maxlength="64" placeholder="Name (optional)">
+  <input name="model" maxlength="64" placeholder="Model (optional)">
+  <input name="team" maxlength="64" placeholder="Team (optional)">
+  <input name="cwd" maxlength="512" placeholder="Directory (optional)">
+  <textarea name="prompt" maxlength="32768" required placeholder="What should it do?"></textarea>
+  <button type="submit">Start</button>
+</form></details></div>
+{{if .Runs}}<div class="scroll"><table>
+<tr><th>State</th><th>Run</th><th class="wide">Directory</th><th class="num">Running for</th><th>Controls</th></tr>
+{{range .Runs}}<tr>
+  <td><span class="state {{if .Terminal}}ended{{else if .ForceRequired}}stopped{{else if .Paused}}waiting{{else}}proceeding{{end}}">{{.State}}</span>
+    {{if .Summary}}<div class="meta">{{.Summary}}</div>{{end}}</td>
+  <td><b>{{.Name}}</b> <span class="meta">{{.Runner}}</span><div class="meta mono">{{.ShortID}}</div></td>
+  <td class="wide mono">{{.Dir}}{{if .Model}}<div class="meta">{{.Model}}</div>{{end}}</td>
+  <td class="num">{{.Duration}}</td>
+  <td><div class="actions control-only">
+    {{if .Live}}
+      {{if .Paused}}<form method="post" action="/api/actions/run-resume">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="run_id" value="{{.ID}}"><button type="submit">Resume</button>
+      </form>{{else}}<form method="post" action="/api/actions/run-pause" data-confirm="Pause this agent and everything it started?">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="run_id" value="{{.ID}}"><input type="hidden" name="confirmation" value="{{.ID}}"><button type="submit">Pause</button>
+      </form>{{end}}
+      <form method="post" action="/api/actions/run-stop" data-confirm="Ask this agent to stop?">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="run_id" value="{{.ID}}"><input type="hidden" name="confirmation" value="{{.ID}}"><button type="submit">Stop</button>
+      </form>
+      {{if .ForceRequired}}<form method="post" action="/api/actions/run-force-stop" data-confirm="Kill this agent and everything it started? Work in progress may be lost.">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="run_id" value="{{.ID}}"><input type="hidden" name="confirmation" value="{{.ID}}"><button class="danger" type="submit">Force stop</button>
+      </form>{{end}}
+    {{else}}<form method="post" action="/api/actions/run-retry" data-confirm="Start a new run with the same instructions?">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="run_id" value="{{.ID}}"><input type="hidden" name="confirmation" value="{{.ID}}"><button type="submit">Retry</button>
+    </form>{{end}}
+  </div></td>
+</tr>{{end}}
+</table></div>{{else}}<p class="empty">No agents started from here.</p>{{end}}
+
 <h2>Agents</h2>
 {{if .Sessions}}<div class="scroll"><table>
 <tr><th>State</th><th>Agent</th><th class="wide">Recent area</th><th class="num">Holds</th><th class="num">Last seen</th><th>Controls</th></tr>
 {{range .Sessions}}<tr>
-  <td><span class="state {{.Aspect}}">{{.Aspect.Label}}</span></td>
+  <td><span class="state {{.Aspect}}">{{.Aspect.Label}}</span><div class="meta">{{.Origin}}</div></td>
   <td><b>{{.Agent}}</b>{{if .Team}} <span class="meta">{{.Team}}</span>{{end}}<div class="meta mono">{{.ShortID}}</div></td>
   <td class="wide mono">{{range .Areas}}{{.}} {{else}}<span class="meta">nothing yet</span>{{end}}{{with .Latest}}<div class="meta">{{.Path}}</div>{{end}}</td>
   <td class="num">{{.Holds}}</td><td class="num">{{.LastSeen}}</td>
@@ -165,4 +233,8 @@ var controlTemplates = template.Must(template.New("control").Parse(`
 {{if .Events}}<div class="scroll"><table><tr><th class="num">Ago</th><th>Event</th><th>Target</th><th class="wide">Detail</th></tr>
 {{range .Events}}<tr><td class="num">{{.Ago}}</td><td>{{.Label}}</td><td class="mono">{{.Path}}</td><td class="wide meta">{{.Agent}}: {{.Detail}}</td></tr>{{end}}</table></div>{{else}}<p class="empty">No coordination activity recorded.</p>{{end}}
 {{end}}
+
+{{define "runlog"}}<section class="runlog"><h3>{{.RunID}} {{.Stream}}</h3>
+{{if .Truncated}}<p class="meta">Earlier output not shown.</p>{{end}}
+<pre class="mono">{{.Text}}</pre></section>{{end}}
 `))
