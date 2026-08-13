@@ -29,6 +29,13 @@ type (
 const (
 	ActorCLI       = journal.ActorCLI
 	ActorDashboard = journal.ActorDashboard
+
+	ActionStart     = journal.RunStart
+	ActionPause     = journal.RunPause
+	ActionResume    = journal.RunResume
+	ActionStop      = journal.RunStop
+	ActionForceStop = journal.RunForceStop
+	ActionRetry     = journal.RunRetry
 )
 
 // Result is one terminal outcome, ready for a CLI to print or a handler to

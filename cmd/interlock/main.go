@@ -46,6 +46,9 @@ const usage = `interlock - keep coding agents out of each other's way
 
   interlock hook <event> <agent>   run as an agent hook (reads payload on stdin)
   interlock codex [args...]        launch Codex so its hooks run and it is blocked
+  interlock run <runner> "prompt"  start an agent Interlock owns and follow it
+  interlock runs list|show|logs|pause|resume|stop|retry
+                                   see and control the agents Interlock started
   interlock check <path>...        may I edit this? exit 0 free, 2 held
   interlock status                 show territory and who holds what
   interlock cleanup [--dry-run]    remove state belonging to expired sessions
@@ -102,6 +105,10 @@ func main() {
 		os.Exit(runDashboard(args[1:]))
 	case "init":
 		os.Exit(runInit(args[1:]))
+	case "run":
+		os.Exit(runRun(args[1:]))
+	case "runs":
+		os.Exit(runRuns(args[1:]))
 	case "supervise":
 		os.Exit(runSupervise(args[1:]))
 	case "-h", "--help", "help":
