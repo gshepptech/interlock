@@ -40,16 +40,14 @@ var (
 	ErrInvalid = errors.New("invalid run request")
 )
 
-// Stream names one of an agent's two output channels.
-type Stream string
+// Stream names one of an agent's two output channels. It is the runner's type
+// because the decoder needs it too, and one enum is easier to trust than two.
+type Stream = runner.Stream
 
 const (
-	Stdout Stream = "stdout"
-	Stderr Stream = "stderr"
+	Stdout = runner.Stdout
+	Stderr = runner.Stderr
 )
-
-// Known reports whether the stream is one of the two Interlock captures.
-func (s Stream) Known() bool { return s == Stdout || s == Stderr }
 
 // Store is the run directory for one repository.
 type Store struct {

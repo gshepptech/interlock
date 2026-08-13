@@ -25,10 +25,7 @@ package managedrun
 import (
 	"fmt"
 	"slices"
-	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/gshepptech/interlock/internal/runner"
 )
@@ -270,28 +267,7 @@ func (r Record) Describe() string {
 	return string(r.Status.State)
 }
 
-// summarise trims free text down to something safe to store and render. Control
-// characters are the real hazard here: they arrive from agent output and would
-// otherwise reach a terminal that interprets them.
-func summarise(text string) string {
-	if text == "" {
-		return ""
-	}
-	if !utf8.ValidString(text) {
-		text = strings.ToValidUTF8(text, "")
-	}
-	text = strings.Map(func(r rune) rune {
-		if r == '\t' || r == '\n' {
-			return ' '
-		}
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, text)
-	text = strings.Join(strings.Fields(text), " ")
-	if len(text) > MaxSummary {
-		text = strings.ToValidUTF8(text[:MaxSummary], "")
-	}
-	return text
-}
+// summarise trims free text down to something safe to store and render. The
+// text arrives from agent output, so escape sequences and control characters
+// are the hazard, and the runner's sanitiser is the one place that removes them.
+func summarise(text string) string { return runner.SafeText(text, MaxSummary) }
