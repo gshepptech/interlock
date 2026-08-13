@@ -313,8 +313,14 @@ func printRunList(out io.Writer, records []managedrun.Record, now time.Time) {
 }
 
 func printRunDetail(out io.Writer, record managedrun.Record, now time.Time) {
-	fmt.Fprintf(out, "id: %s\nstate: %s\nrunner: %s\nname: %s\n",
-		record.ID(), record.Describe(), record.Runner(), record.Label())
+	// The state and the outcome are separate lines because they answer different
+	// questions. The state is the machine's word for where the run got to; the
+	// outcome is what a person needs to know about how it ended.
+	fmt.Fprintf(out, "id: %s\nstate: %s\n", record.ID(), record.Status.State)
+	if outcome := record.Describe(); outcome != string(record.Status.State) {
+		fmt.Fprintf(out, "outcome: %s\n", outcome)
+	}
+	fmt.Fprintf(out, "runner: %s\nname: %s\n", record.Runner(), record.Label())
 	if record.Spec.Options.Model != "" {
 		fmt.Fprintf(out, "model: %s\n", record.Spec.Options.Model)
 	}

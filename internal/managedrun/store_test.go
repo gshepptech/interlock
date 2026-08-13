@@ -460,6 +460,12 @@ func TestRecordDescribesItsOutcome(t *testing.T) {
 		{"completed", Status{State: Completed}, "completed"},
 		{"exit code", Status{State: Failed, ExitCode: &code}, "failed with exit code 3"},
 		{"signal", Status{State: Failed, Signal: "SIGKILL"}, "failed after SIGKILL"},
+		{"stopped cleanly", Status{State: Completed, Reason: ReasonStoppedByUser},
+			"stopped on request"},
+		{"stopped abruptly", Status{State: Failed, Signal: "SIGINT", Reason: ReasonStoppedByUser},
+			"stopped on request"},
+		{"force stopped", Status{State: Failed, Signal: "SIGKILL", Reason: ReasonForceStopped},
+			"force stopped"},
 		{"force required", Status{State: Stopping, ForceRequired: true},
 			"stopping; the agent has not exited and force is required"},
 	}

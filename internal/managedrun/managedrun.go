@@ -245,14 +245,26 @@ func (r Record) Duration(now time.Time) time.Duration {
 // Describe renders the state for a person, including the exit detail that makes
 // a bare "failed" actionable.
 func (r Record) Describe() string {
+	// A run someone stopped is described as stopped whichever way the agent
+	// took it. Reporting "completed" or "failed" for a deliberate stop makes an
+	// ordinary action read like luck or like a fault.
 	switch r.Status.State {
 	case Completed:
+		if r.Status.Reason == ReasonStoppedByUser {
+			return "stopped on request"
+		}
 		return "completed"
 	case Failed:
-		if r.Status.Signal != "" {
+		switch {
+		case r.Status.Reason == ReasonForceStopped:
+			return "force stopped"
+		case r.Status.Reason == ReasonStoppedByUser:
+			return "stopped on request"
+		case r.Status.Reason == ReasonLaunchFailed:
+			return "failed to start"
+		case r.Status.Signal != "":
 			return "failed after " + r.Status.Signal
-		}
-		if r.Status.ExitCode != nil {
+		case r.Status.ExitCode != nil:
 			return fmt.Sprintf("failed with exit code %d", *r.Status.ExitCode)
 		}
 		return "failed"

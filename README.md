@@ -117,6 +117,43 @@ sequenceDiagram
     I-->>I: claim released
 ```
 
+### Agents Interlock started, and agents it merely noticed
+
+Everything above is about an agent that turned up: you started it, its hooks
+fire, and Interlock infers what it can from them. `interlock run` is the other
+half. Interlock starts the agent itself, so it owns the process and can say what
+it is doing rather than what it recently did.
+
+```bash
+interlock run codex "implement the invitation API" --name api
+interlock runs list
+interlock runs pause run-… --confirm run-…
+interlock runs stop  run-… --confirm run-…
+```
+
+The two are kept apart on purpose, in the vocabulary as well as the code. A run
+Interlock started can be paused, resumed and stopped, and its state is a fact.
+An agent it only observed is labelled `observed` and is offered no process
+controls at all, because Interlock does not own it and pretending otherwise
+would be the panel lying to you.
+
+Three rules make the owned half trustworthy:
+
+- **No signal is ever sent to a stored process id.** A pid is a number that was
+  true when it was written, and by the time anything reads it the process may
+  have exited and the number may belong to something you are using. Every
+  lifecycle command talks to the run's own supervisor and asks it to signal the
+  group it created.
+- **Signals go to the whole process group.** Agents spawn things, and stopping
+  only the process Interlock started would leave that tree writing to your
+  repository after the run was supposedly over.
+- **Nothing is escalated automatically.** A graceful stop the agent ignores
+  leaves the run saying force is required, and there it stays. Killing an agent
+  part way through writing a file is a decision for a person.
+
+If a supervisor dies, the run is marked `lost` rather than guessed at: Interlock
+will not signal a process it can no longer prove is the right one.
+
 ### Three layers, in the order they do work
 
 | | | |
@@ -245,7 +282,10 @@ up" on a second run.
 | `interlock lease release ID --confirm ID` | Release only one session's file holds. |
 | `interlock handoff request\|list\|show\|resolve` | Manage the bounded lightweight handoff request queue. |
 | `interlock status` | Territory and who holds what, in the terminal. |
-| `interlock dashboard` | The loopback-only panel, including stale-session, lease, diagnostic, and handoff controls. |
+| `interlock run <runner> "prompt"` | Start an agent Interlock owns, and follow its output. `Ctrl-C` detaches; it does not stop the agent. |
+| `interlock runs list\|show\|logs` | See the agents Interlock started and what they have said. |
+| `interlock runs pause\|resume\|stop\|retry ID --confirm ID` | Control one of them. `stop --force` kills it, and is only offered once a graceful stop has been ignored. |
+| `interlock dashboard` | The loopback-only panel, including the run launcher and controls, plus stale-session, lease, diagnostic, and handoff controls. |
 
 ---
 
@@ -323,6 +363,12 @@ it does not have is worse than none:**
   degrading into a racing no-op.
 - No automated test drives the two real agents against each other. Every
   cross-vendor claim above was verified by hand.
+- `interlock run` starts agents headless. There is no way to type into one; if
+  you want a conversation, start the agent yourself and let the hooks coordinate
+  it. Asking for an interactive run is refused rather than quietly downgraded.
+- The exact `codex exec` and `claude --print` invocations are exercised against
+  fake agents in the test suite. Running them against the real CLIs is the
+  opt-in acceptance script, not part of `go test ./...`.
 
 ---
 
@@ -339,6 +385,9 @@ internal/verification/ pending snapshots for opaque command checks
 internal/remedy/      narrow permission to undo a flagged write
 internal/journal/     what was prevented, capped
 internal/territory/   optional path rules
+internal/runner/      launch options to an exact command, per agent
+internal/managedrun/  runs Interlock owns: records, logs, supervisor, liveness
+internal/runcontrol/  shared typed run actions for CLI and dashboard
 internal/dashboard/   the panel, server-rendered
 internal/control/     shared typed control actions for CLI and dashboard
 internal/controlhttp/ strict loopback HTTP envelope for control actions
