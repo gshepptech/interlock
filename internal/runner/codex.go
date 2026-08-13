@@ -34,7 +34,7 @@ func (codex) Capabilities() Capabilities {
 // visible in every process listing on the machine for as long as the agent
 // runs, and prompts routinely describe work that is not public.
 func (c codex) Build(o Options, env Environment) (Launch, error) {
-	path, dir, err := build(o, env, c.Capabilities(), string(Codex), codexSearchPaths)
+	path, dir, err := build(o, env, string(Codex), codexSearchPaths)
 	if err != nil {
 		return Launch{}, err
 	}

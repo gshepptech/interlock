@@ -85,6 +85,46 @@ func TestControlEntriesUseJournalVersionTwoAndTypedFields(t *testing.T) {
 	}
 }
 
+// A journal written before managed runs existed is history, and history is not
+// improved by discarding it. Version 2 rows stay readable, version 3 rows are
+// what this binary writes, and anything newer is left alone.
+func TestControlRecordsFromEitherVersionAreStillRead(t *testing.T) {
+	now := time.Now()
+	s := store(t, &now)
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	older := Entry{
+		Version: 2, At: now, Kind: ControlAction, Actor: ActorCLI,
+		Action: ReleaseLeases, Target: "session-1", Result: Completed,
+	}
+	line, err := json.Marshal(older)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.file, append(line, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Append(Entry{
+		Kind: ControlAction, Actor: ActorDashboard, Action: RunStop,
+		Target: "run-0123456789abcdef01234567", Result: Completed,
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	got, err := s.Recent(2)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("Recent = %#v err=%v", got, err)
+	}
+	if got[0].Action != RunStop || got[0].Version != ControlVersion {
+		t.Fatalf("newest = %#v", got[0])
+	}
+	if got[1].Action != ReleaseLeases || got[1].Version != 2 {
+		t.Fatalf("oldest = %#v; a version 2 record must still be readable", got[1])
+	}
+}
+
 func TestAppendRejectsUntypedControlFields(t *testing.T) {
 	now := time.Now()
 	s := store(t, &now)

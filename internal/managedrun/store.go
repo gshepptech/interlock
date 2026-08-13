@@ -90,7 +90,10 @@ type Create struct {
 // the run is a queued record that reconciliation will mark lost, not a silent
 // gap.
 func (c *Store) Create(input Create) (Record, error) {
-	if err := input.Options.Validate(); err != nil {
+	// Check rather than Validate: a request the chosen agent cannot honour is
+	// refused here, before any state exists, rather than becoming a run that
+	// fails the moment a supervisor picks it up.
+	if err := runner.Check(input.Options); err != nil {
 		return Record{}, err
 	}
 	if err := runner.ValidatePrompt(input.Prompt); err != nil {

@@ -15,7 +15,7 @@ func (claude) Capabilities() Capabilities {
 // and nothing positional, Claude reads it from stdin, which keeps it out of the
 // machine's process listing.
 func (c claude) Build(o Options, env Environment) (Launch, error) {
-	path, dir, err := build(o, env, c.Capabilities(), string(Claude), nil)
+	path, dir, err := build(o, env, string(Claude), nil)
 	if err != nil {
 		return Launch{}, err
 	}

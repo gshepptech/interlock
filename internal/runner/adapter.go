@@ -152,26 +152,43 @@ func resolveEnv(o Options, env Environment) []string {
 	return append(out, env.Link...)
 }
 
+// Check reports whether the chosen runner can honour the options, without
+// touching the filesystem.
+//
+// It exists so that a request nobody can satisfy is refused before any state is
+// written. The alternative is a run that is created, queued, started, and only
+// then discovered to be impossible, which turns a typing mistake into a failed
+// run in someone's history.
+func Check(o Options) error {
+	if err := o.Validate(); err != nil {
+		return err
+	}
+	adapter, err := For(o.Runner)
+	if err != nil {
+		return err
+	}
+	caps := adapter.Capabilities()
+	switch {
+	case o.Interactive && !caps.Interactive:
+		return fmt.Errorf(
+			"%w: %s cannot be run interactively by Interlock in this release; "+
+				"leave it headless and follow its output instead", ErrUnsupported, o.Runner)
+	case !o.Interactive && !caps.Headless:
+		return fmt.Errorf("%w: %s has no headless mode", ErrUnsupported, o.Runner)
+	case o.Model != "" && !caps.ModelSelection:
+		return fmt.Errorf("%w: %s does not accept a model", ErrUnsupported, o.Runner)
+	}
+	return nil
+}
+
 // build is the shared half of every adapter's Build: the checks that do not
 // depend on which agent is being launched.
-func build(o Options, env Environment, caps Capabilities, executable string,
-	search []string) (string, string, error) {
-	if err := o.Validate(); err != nil {
+func build(o Options, env Environment, executable string, search []string) (string, string, error) {
+	if err := Check(o); err != nil {
 		return "", "", err
 	}
 	if o.Runner != Name(executable) {
 		return "", "", fmt.Errorf("%w: options are for %s", ErrInvalid, o.Runner)
-	}
-	if o.Interactive && !caps.Interactive {
-		return "", "", fmt.Errorf(
-			"%w: %s cannot be run interactively by Interlock in this release; "+
-				"omit --interactive to run it headless", ErrUnsupported, o.Runner)
-	}
-	if !o.Interactive && !caps.Headless {
-		return "", "", fmt.Errorf("%w: %s has no headless mode", ErrUnsupported, o.Runner)
-	}
-	if o.Model != "" && !caps.ModelSelection {
-		return "", "", fmt.Errorf("%w: %s does not accept a model", ErrUnsupported, o.Runner)
 	}
 	dir, err := ResolveDir(env.Root, o.WorkingDir)
 	if err != nil {

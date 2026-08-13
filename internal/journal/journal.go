@@ -36,7 +36,16 @@ const trimAt = 2 * Keep
 // ControlVersion is journal-specific. Other stores remain on state version 1.
 // Phase 0 treats these records as future state and therefore refuses to trim a
 // mixed journal rather than deleting audit history it cannot interpret.
-const ControlVersion = 2
+//
+// Version 3 adds the managed-run actions. An older binary reading a v3 row sees
+// future state and declines to trim the file, which is the behaviour that keeps
+// a mixed journal intact rather than silently shortened.
+const ControlVersion = 3
+
+// MinControlVersion is the oldest control record this binary still reads. A
+// journal written before managed runs existed is history, and history is not
+// improved by discarding it.
+const MinControlVersion = 2
 
 var errKindVersion = errors.New("journal kind/version mismatch")
 
@@ -87,12 +96,19 @@ const (
 	DoctorRepair   Action = "doctor_repair"
 	HandoffRequest Action = "handoff_request"
 	HandoffResolve Action = "handoff_resolve"
+	RunStart       Action = "run_start"
+	RunPause       Action = "run_pause"
+	RunResume      Action = "run_resume"
+	RunStop        Action = "run_stop"
+	RunForceStop   Action = "run_force_stop"
+	RunRetry       Action = "run_retry"
 )
 
 func (a Action) known() bool {
 	switch a {
 	case CleanupAll, CleanupSession, ReleaseLeases, DoctorSmoke, DoctorRepair,
-		HandoffRequest, HandoffResolve:
+		HandoffRequest, HandoffResolve,
+		RunStart, RunPause, RunResume, RunStop, RunForceStop, RunRetry:
 		return true
 	}
 	return false
@@ -328,9 +344,9 @@ func validateEntry(path string, entry Entry) error {
 		return fmt.Errorf("unknown kind %q", entry.Kind)
 	}
 	if entry.Kind == ControlAction {
-		if entry.Version != ControlVersion {
-			return fmt.Errorf("%w: control action version %d, want %d",
-				errKindVersion, entry.Version, ControlVersion)
+		if entry.Version < MinControlVersion {
+			return fmt.Errorf("%w: control action version %d, want %d to %d",
+				errKindVersion, entry.Version, MinControlVersion, ControlVersion)
 		}
 		return nil
 	}
@@ -352,6 +368,22 @@ func validateVersion(path string, version int) error {
 	default:
 		return nil
 	}
+}
+
+// Downgrade is the outcome to record when the action succeeded but the audit
+// row could not be written.
+//
+// The action still happened, and saying otherwise would be the worse lie. What
+// changes is that the result carries a warning, so nobody reads the journal
+// later and concludes that nothing was done.
+func Downgrade(outcome Outcome) Outcome {
+	switch outcome {
+	case Completed, NoChange:
+		return CompletedAuditWarning
+	case Partial:
+		return PartialAuditWarning
+	}
+	return outcome
 }
 
 func validateControl(e Entry) error {
