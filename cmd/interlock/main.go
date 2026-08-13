@@ -102,6 +102,8 @@ func main() {
 		os.Exit(runDashboard(args[1:]))
 	case "init":
 		os.Exit(runInit(args[1:]))
+	case "supervise":
+		os.Exit(runSupervise(args[1:]))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		os.Exit(exitOK)

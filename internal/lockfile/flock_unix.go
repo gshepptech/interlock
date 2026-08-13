@@ -3,6 +3,7 @@
 package lockfile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -37,4 +38,45 @@ func Acquire(path string) (unlock func(), err error) {
 		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		f.Close()
 	}, nil
+}
+
+// TryAcquire takes the lock if it is free and reports failure rather than
+// waiting.
+//
+// Acquire is right for the microsecond-long read-decide-write sections
+// everywhere else. This exists for the one lock that is held for the whole life
+// of a process: a supervisor's claim on its run. There, "someone else already
+// holds this" is the answer, not a queue to join, and whether the lock is held
+// is also how anything else decides that a supervisor is alive.
+func TryAcquire(path string) (unlock func(), acquired bool, err error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, false, fmt.Errorf("open lock %s: %w", path, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("flock %s: %w", path, err)
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, true, nil
+}
+
+// Held reports whether another process is holding the lock at path. It is a
+// question about liveness, so it never leaves the lock taken: the answer is
+// what happens when we try, and then we let go again.
+func Held(path string) (bool, error) {
+	unlock, acquired, err := TryAcquire(path)
+	if err != nil {
+		return false, err
+	}
+	if !acquired {
+		return true, nil
+	}
+	unlock()
+	return false, nil
 }

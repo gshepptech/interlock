@@ -373,10 +373,53 @@ func (c *Store) StatusPath(id string) string { return filepath.Join(c.Dir(id), "
 func (c *Store) PromptPath(id string) string { return filepath.Join(c.Dir(id), "prompt") }
 func (c *Store) TokenPath(id string) string  { return filepath.Join(c.Dir(id), "control.token") }
 
-// SocketPath is where a live supervisor listens. Its presence proves nothing on
-// its own: a socket file outlives the process that made it, which is why every
-// request carries the run generation.
+// SocketPath is where a live supervisor prefers to listen. Its presence proves
+// nothing on its own: a socket file outlives the process that made it, which is
+// why every request carries the run generation.
 func (c *Store) SocketPath(id string) string { return filepath.Join(c.Dir(id), "control.sock") }
+
+// ControlAddrPath records where a supervisor actually listened, and exists only
+// when that was not the preferred path. See ControlAddress.
+func (c *Store) ControlAddrPath(id string) string {
+	return filepath.Join(c.Dir(id), "control.addr")
+}
+
+// MaxSocketPath is the practical limit on a unix socket path. The kernel's
+// sockaddr_un is 104 bytes on the BSDs and 108 on Linux, and a socket cannot be
+// bound at a longer path however sensible that path looks.
+const MaxSocketPath = 100
+
+// ControlAddress is where to connect for a run.
+//
+// A run's socket belongs beside the rest of its files, and usually is there.
+// But the address of a unix socket is a fixed-size field, and a repository a
+// few directories deep plus a run identifier can exceed it. Rather than fail a
+// launch over the length of somebody's checkout path, a supervisor in that
+// position binds somewhere short and leaves this note behind saying where.
+func (c *Store) ControlAddress(id string) string {
+	preferred := c.SocketPath(id)
+	raw, err := readSecure(c.ControlAddrPath(id))
+	if err != nil {
+		return preferred
+	}
+	address := strings.TrimSpace(string(raw))
+	if !validSocketPath(address) {
+		return preferred
+	}
+	return address
+}
+
+// FallbackSocketPath is the short address used when the run directory is too
+// deep. The name carries the tail of the run id, which is random, so two runs
+// never collide and no other user can predict it.
+func FallbackSocketPath(id string) string {
+	return filepath.Join(os.TempDir(), "interlock-"+id[len(id)-12:]+".sock")
+}
+
+func validSocketPath(address string) bool {
+	return filepath.IsAbs(address) && len(address) <= MaxSocketPath &&
+		strings.HasSuffix(address, ".sock") && !strings.ContainsAny(address, "\n\r\x00")
+}
 
 // SupervisorLockPath is held for the lifetime of a supervisor. The kernel drops
 // it when that process dies, for any reason, which is what makes "no supervisor"
