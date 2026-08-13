@@ -88,12 +88,9 @@ func (s *Supervisor) Serve(ctx context.Context) error {
 	}
 	s.applyDefaults()
 
-	unlock, acquired, err := lockfile.TryAcquire(s.Store.SupervisorLockPath(s.RunID))
+	unlock, err := s.claim()
 	if err != nil {
 		return err
-	}
-	if !acquired {
-		return ErrAlreadySupervised
 	}
 	defer unlock()
 
@@ -119,6 +116,29 @@ func (s *Supervisor) Serve(ctx context.Context) error {
 		return err
 	}
 	return s.run(ctx, adapter, launch, prompt, token)
+}
+
+// claim takes the run's lock, which is both the exclusion between supervisors
+// and the proof of liveness everything else relies on.
+//
+// The retry is not politeness. Reconciliation asks whether the lock is held by
+// trying to take it, which means there is a brief moment when a perfectly good
+// run appears to be claimed. Without a second attempt, a supervisor starting in
+// exactly that moment would stand down and leave a run nobody ever starts.
+func (s *Supervisor) claim() (func(), error) {
+	for attempt := range 4 {
+		unlock, acquired, err := lockfile.TryAcquire(s.Store.SupervisorLockPath(s.RunID))
+		if err != nil {
+			return nil, err
+		}
+		if acquired {
+			return unlock, nil
+		}
+		if attempt < 3 {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	return nil, ErrAlreadySupervised
 }
 
 func (s *Supervisor) applyDefaults() {

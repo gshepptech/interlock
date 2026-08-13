@@ -109,6 +109,10 @@ var ErrNoSupervisor = errors.New("no supervisor is listening for this run")
 // run. The generation proves the answering supervisor is this run's, and not a
 // process that inherited an abandoned socket path.
 func (c *Store) Call(id string, action ControlAction) (ControlResponse, error) {
+	return c.call(id, action, dialTimeout)
+}
+
+func (c *Store) call(id string, action ControlAction, timeout time.Duration) (ControlResponse, error) {
 	if !ValidID(id) {
 		return ControlResponse{}, ErrNotFound
 	}
@@ -124,7 +128,7 @@ func (c *Store) Call(id string, action ControlAction) (ControlResponse, error) {
 		return ControlResponse{}, err
 	}
 
-	conn, err := net.DialTimeout("unix", c.ControlAddress(id), dialTimeout)
+	conn, err := net.DialTimeout("unix", c.ControlAddress(id), timeout)
 	if err != nil {
 		return ControlResponse{}, fmt.Errorf("%w: %s", ErrNoSupervisor, id)
 	}
