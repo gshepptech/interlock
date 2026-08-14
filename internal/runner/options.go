@@ -93,6 +93,12 @@ type Options struct {
 	Name  string `json:"name,omitempty"`
 	Model string `json:"model,omitempty"`
 	Team  string `json:"team,omitempty"`
+	// Item names the work this run is doing, as an opaque identifier from
+	// whatever tracks work here — in practice a rounce item id. Interlock never
+	// interprets it and never fetches anything with it. It exists so that a
+	// finished run can be traced back to what it was for, and so a repository
+	// with no work store behaves identically without one.
+	Item string `json:"item,omitempty"`
 	// WorkingDir is slash-separated and relative to the repository root. It is
 	// stored relative so a run record stays meaningful if the checkout moves.
 	WorkingDir string `json:"working_dir,omitempty"`
@@ -149,6 +155,9 @@ func (o Options) Validate() error {
 		return err
 	}
 	if err := label("team", o.Team, MaxTeamLen); err != nil {
+		return err
+	}
+	if err := label("item", o.Item, MaxNameLen); err != nil {
 		return err
 	}
 	if err := validateDir(o.WorkingDir); err != nil {

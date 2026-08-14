@@ -50,6 +50,7 @@ const usage = `interlock - keep coding agents out of each other's way
   interlock run <runner> "prompt"  start an agent Interlock owns and follow it
   interlock runs list|show|logs|pause|resume|stop|retry
                                    see and control the agents Interlock started
+  interlock next                   what is workable now, if a work store says
   interlock check <path>...        may I edit this? exit 0 free, 2 held
   interlock status                 show territory and who holds what
   interlock cleanup [--dry-run]    remove state belonging to expired sessions
@@ -110,6 +111,8 @@ func main() {
 		os.Exit(runRun(args[1:]))
 	case "runs":
 		os.Exit(runRuns(args[1:]))
+	case "next":
+		os.Exit(runNext(args[1:]))
 	case "supervise":
 		os.Exit(runSupervise(args[1:]))
 	case "-h", "--help", "help":

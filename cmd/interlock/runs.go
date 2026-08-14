@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,6 +21,9 @@ import (
 const runsUsage = `usage:
   interlock run <codex|claude> "prompt" [--name N] [--model M] [--team T]
       [--cwd DIR] [--env NAME ...] [--no-follow]
+  interlock run <codex|claude> --next [flags]        the top ready item
+  interlock run <codex|claude> --item ID [flags]     one named item
+  interlock next                                     what is workable now
   interlock runs list
   interlock runs show ID
   interlock runs logs ID [--stderr] [--follow] [--bytes N]
@@ -41,10 +45,17 @@ func runRun(args []string) int {
 		return exitUsage
 	}
 	options := runner.Options{Runner: runner.Name(args[0])}
-	prompt := args[1]
 	follow := true
+	next := false
 
-	rest := args[2:]
+	// The prompt is positional, and optional only because --next and --item
+	// fetch one. Anything starting with a dash is a flag, so a run with no
+	// prompt is unambiguous rather than a guess.
+	prompt := ""
+	rest := args[1:]
+	if !strings.HasPrefix(args[1], "-") {
+		prompt, rest = args[1], args[2:]
+	}
 	for i := 0; i < len(rest); i++ {
 		value := func() (string, bool) {
 			if i+1 >= len(rest) {
@@ -74,6 +85,10 @@ func runRun(args []string) int {
 			options.Interactive, ok = true, true
 		case "--no-follow":
 			follow, ok = false, true
+		case "--next":
+			next, ok = true, true
+		case "--item":
+			options.Item, ok = value()
 		default:
 			ok = false
 		}
@@ -81,6 +96,21 @@ func runRun(args []string) int {
 			fmt.Fprintf(os.Stderr, "unexpected argument %q\n\n%s", rest[i], runsUsage)
 			return exitUsage
 		}
+	}
+
+	if next || (options.Item != "" && prompt == "") {
+		brief, item, code := briefFromQueue(options.Item)
+		if code != exitOK {
+			return code
+		}
+		prompt, options.Item = brief, item
+		if options.Name == "" {
+			options.Name = item
+		}
+	}
+	if prompt == "" {
+		fmt.Fprint(os.Stderr, "a prompt is required, or --next to take the top ready item\n")
+		return exitUsage
 	}
 
 	service, err := newRunService()

@@ -294,6 +294,8 @@ up" on a second run.
 | `interlock status` | Territory and who holds what, in the terminal. |
 | `interlock run <runner> "prompt"` | Start an agent Interlock owns, and follow its output. `Ctrl-C` detaches; it does not stop the agent. |
 | `interlock runs list\|show\|logs` | See the agents Interlock started and what they have said. |
+| `interlock next` | What is workable right now, if a work store says. Nothing here depends on having one. |
+| `interlock run <runner> --next` | Start an agent on the top ready item, briefed from it. |
 | `interlock runs pause\|resume\|stop\|retry ID --confirm ID` | Control one of them. `stop --force` kills it, and is only offered once a graceful stop has been ignored. |
 | `interlock dashboard` | The loopback-only panel, including the run launcher and controls, plus stale-session, lease, diagnostic, and handoff controls. |
 
