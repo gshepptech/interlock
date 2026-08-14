@@ -29,12 +29,24 @@ import (
 // View is everything the page shows, assembled before rendering so the template
 // contains no logic worth testing separately.
 type View struct {
-	Root        string
-	Teams       []TeamView
-	Sessions    []SessionView
-	Runs        []RunView
-	Leases      []LeaseView
-	Events      []EventView
+	Root     string
+	Teams    []TeamView
+	Sessions []SessionView
+	Runs     []RunView
+	Leases   []LeaseView
+	Events   []EventView
+	// Queue is what rounce says is workable right now, already filtered by
+	// rounce against the very leases shown further down this page. It is
+	// empty when rounce is not installed here, which is most repositories:
+	// Interlock keeps agents apart in repositories that have never heard of
+	// a work store, and the panel must not imply otherwise.
+	//
+	// This is the read side of the join. The panel shows it because this is
+	// where a person sits to watch agents work, and "what should happen
+	// next" is the one question the rest of the page cannot answer.
+	Queue     []QueueView
+	HasRounce bool
+
 	Prevented   int
 	Escaped     int
 	GeneratedAt string
@@ -209,6 +221,15 @@ func RunViews(records []managedrun.Record, now time.Time) []RunView {
 
 // Build assembles the view. It takes already-loaded state rather than reading it
 // so the assembly is testable without a repo on disk.
+// QueueView is one workable item, as rounce ranked it.
+type QueueView struct {
+	ID    string
+	Score int
+	Type  string
+	Title string
+	Paths string
+}
+
 func Build(cfg *config.Config, sessions []*session.Session, leases []*lease.Lease,
 	events []journal.Entry, now time.Time) View {
 	v := View{
@@ -581,6 +602,29 @@ tr:last-child td { border-bottom: 0; }
 </section>
 
 {{if .Warning}}<p class="note">{{.Warning}}</p>{{end}}
+
+{{if .HasRounce}}
+<h2>Next <em>from rounce, already filtered against the files held below</em></h2>
+{{if .Queue}}
+<div class="scroll"><table>
+  <tr><th class="num">Score</th><th>Item</th><th class="hide-narrow">Touches</th></tr>
+  {{range .Queue}}
+  <tr>
+    <td class="num mono">{{.Score}}</td>
+    <td>
+      <div class="who">{{.Title}}</div>
+      <div class="meta mono">{{.ID}} · {{.Type}}</div>
+    </td>
+    <td class="hide-narrow meta mono">{{if .Paths}}{{.Paths}}{{else}}—{{end}}</td>
+  </tr>
+  {{end}}
+</table></div>
+{{else}}
+<div class="empty">Nothing is workable right now. Either the queue is empty, or
+every item left touches a file someone is holding — the two are different, and
+<code>rounce blocked</code> says which.</div>
+{{end}}
+{{end}}
 
 <h2>Agents</h2>
 {{if .Sessions}}

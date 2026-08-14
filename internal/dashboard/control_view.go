@@ -186,6 +186,18 @@ var controlTemplates = template.Must(template.New("control").Parse(`
 </tr>{{end}}
 </table></div>{{else}}<p class="empty">No agents started from here.</p>{{end}}
 
+{{if .HasRounce}}
+<h2>Next <em>from rounce, already filtered against the files held below</em></h2>
+{{if .Queue}}<div class="scroll"><table>
+<tr><th class="num">Score</th><th>Item</th><th class="wide">Touches</th></tr>
+{{range .Queue}}<tr>
+  <td class="num mono">{{.Score}}</td>
+  <td><b>{{.Title}}</b><div class="meta mono">{{.ID}} · {{.Type}}</div></td>
+  <td class="wide mono">{{if .Paths}}{{.Paths}}{{else}}<span class="meta">not declared</span>{{end}}</td>
+</tr>{{end}}
+</table></div>{{else}}<p class="empty">Nothing is workable right now. Either the queue is empty, or every item left touches a file someone is holding &mdash; <code>rounce blocked</code> says which.</p>{{end}}
+{{end}}
+
 <h2>Agents</h2>
 {{if .Sessions}}<div class="scroll"><table>
 <tr><th>State</th><th>Agent</th><th class="wide">Recent area</th><th class="num">Holds</th><th class="num">Last seen</th><th>Controls</th></tr>

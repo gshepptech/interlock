@@ -37,6 +37,7 @@ import (
 	"github.com/gshepptech/interlock/internal/managedrun"
 	"github.com/gshepptech/interlock/internal/observed"
 	"github.com/gshepptech/interlock/internal/remedy"
+	"github.com/gshepptech/interlock/internal/rounce"
 	"github.com/gshepptech/interlock/internal/session"
 	"github.com/gshepptech/interlock/internal/shellscan"
 	"github.com/gshepptech/interlock/internal/territory"
@@ -1128,6 +1129,25 @@ func dashboardLoad(cfg *config.Config) controlhttp.Load {
 		// lost before anyone sees a control for it.
 		if records, err := managedrun.Open(cfg.Root).Reconcile(); err == nil {
 			view.Runs = dashboard.RunViews(records, now)
+		}
+
+		// The read side of the join. rounce has already excluded whatever
+		// collides with the leases this same page shows below, so the panel
+		// renders the queue rather than re-deriving it -- two answers to
+		// "what is workable" would drift, and the drift would show as a
+		// panel recommending work it is itself reporting as held.
+		//
+		// Absent rounce leaves HasRounce false and the section unrendered,
+		// which is most repositories: Interlock keeps agents apart whether
+		// or not a work store exists.
+		if items, ok := rounce.Ready(context.Background(), cfg.Root); ok {
+			view.HasRounce = true
+			for _, it := range items {
+				view.Queue = append(view.Queue, dashboard.QueueView{
+					ID: it.ID, Score: it.Score, Type: it.Type,
+					Title: it.Title, Paths: it.Paths,
+				})
+			}
 		}
 		return view, requests, nil
 	}
