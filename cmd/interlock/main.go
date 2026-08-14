@@ -93,7 +93,7 @@ func main() {
 	case "check":
 		os.Exit(runCheck(args[1:]))
 	case "status":
-		os.Exit(runStatus())
+		os.Exit(runStatusCmd(args[1:]))
 	case "cleanup":
 		os.Exit(runCleanup(args[1:]))
 	case "lease":
