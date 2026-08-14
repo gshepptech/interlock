@@ -272,7 +272,29 @@ func redirectTarget(segment string) (string, bool) {
 	if len(fields) == 0 {
 		return "", false
 	}
-	return fields[0], true
+	target := fields[0]
+
+	// `2>&1` duplicates a file descriptor. There is no file, so there is
+	// nothing to hold -- and a lease on a path named "&1" is pure noise in
+	// every view that lists what an agent is working on.
+	if strings.HasPrefix(target, "&") {
+		return "", false
+	}
+	// Writing to a device is not editing anything two agents can collide
+	// over. `>/dev/null` appears in most commands an agent runs; leasing it
+	// would mean every agent holds the same "file" forever.
+	if isDevice(target) {
+		return "", false
+	}
+	return target, true
+}
+
+// isDevice reports whether path is a character device a shell redirects to
+// rather than a file in the repository.
+func isDevice(path string) bool {
+	return path == "/dev/null" || path == "/dev/tty" ||
+		path == "/dev/stdout" || path == "/dev/stderr" ||
+		strings.HasPrefix(path, "/dev/fd/")
 }
 
 // isOpaque reports whether a string contains anything the shell would expand.

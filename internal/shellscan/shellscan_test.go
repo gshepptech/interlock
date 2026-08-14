@@ -2,6 +2,7 @@ package shellscan
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -147,6 +148,34 @@ func TestEmptyCommand(t *testing.T) {
 	for _, cmd := range []string{"", "   ", "\n"} {
 		if got := Scan(cmd); got.Confidence != None {
 			t.Errorf("Scan(%q).Confidence = %v, want None", cmd, got.Confidence)
+		}
+	}
+}
+
+// TestRedirectionToADescriptorOrDeviceIsNotAFile.
+//
+// Found by looking at a real dashboard: two agents were shown holding
+// "~/Projects/rounce/&1" and "~/Projects/rounce/dev/null". Both came from
+// ordinary commands -- `go build ./... 2>&1` and `rounce init >/dev/null`.
+//
+// `2>&1` duplicates a descriptor, so there is no file. /dev/null is a
+// device every agent writes to constantly, so leasing it would mean every
+// agent permanently holds the same thing. Neither is a file two agents can
+// collide over, and a lease on one is noise in every view that lists what
+// an agent has open.
+func TestRedirectionToADescriptorOrDeviceIsNotAFile(t *testing.T) {
+	for _, command := range []string{
+		"go build ./... 2>&1",
+		"go test ./... >/dev/null 2>&1",
+		"rounce init >/dev/null",
+		"echo hi >/dev/stderr",
+	} {
+		got := Scan(command)
+		for _, p := range got.Paths {
+			if strings.HasPrefix(p, "&") || strings.Contains(p, "dev/null") ||
+				strings.Contains(p, "dev/stderr") {
+				t.Errorf("%q: leased %q, which is not a file", command, p)
+			}
 		}
 	}
 }
