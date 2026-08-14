@@ -66,6 +66,19 @@ func runRun(args []string) int {
 		}
 		var ok bool
 		switch rest[i] {
+		case "--":
+			// Everything after the sentinel is the prompt, whatever it
+			// looks like. Without this a caller passing text it did not
+			// write -- a web form, a script, another program -- has no way
+			// to say "this is data": a prompt beginning with a dash is
+			// parsed as flags, so --env and --model are injectable and the
+			// text itself is silently discarded. A caller cannot fix that
+			// by quoting, because argv carries no quoting.
+			if i+1 < len(rest) {
+				prompt = strings.Join(rest[i+1:], " ")
+			}
+			i = len(rest)
+			ok = true
 		case "--name":
 			options.Name, ok = value()
 		case "--model":

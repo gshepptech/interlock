@@ -99,9 +99,133 @@ var controlTemplates = template.Must(template.New("control").Parse(`
 <title>Interlock</title>
 <link rel="icon" href="data:,">
 <style nonce="{{.Nonce}}">
-:root{--panel:#fff;--deck:#e8ebed;--ink:#14181b;--muted:#5b666d;--faint:#8b959b;--rule:#ccd3d7;--hard:#aab4ba;--ok:#1c7a4b;--warn:#a56700;--bad:#bd1f2d}
-@media(prefers-color-scheme:dark){:root{--panel:#1b2024;--deck:#111518;--ink:#e6ebee;--muted:#98a4ab;--faint:#6d787f;--rule:#2b3238;--hard:#3d464d;--ok:#43b47c;--warn:#d99a2b;--bad:#e0616c}}
-*{box-sizing:border-box;letter-spacing:0}body{margin:0;background:var(--deck);color:var(--ink);font:13px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;font-variant-numeric:tabular-nums}.wrap{max-width:1220px;margin:auto;padding:0 16px 52px}.mono,code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.head{display:flex;align-items:baseline;gap:18px;padding:18px 0 14px;border-bottom:2px solid var(--hard)}.mark{font-weight:750;text-transform:uppercase}.repo{flex:1;color:var(--muted);font-size:12px;word-break:break-all}.clock,.meta{color:var(--faint);font-size:11px}.indications{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));background:var(--panel);border-bottom:1px solid var(--rule)}.ind{padding:13px 15px;border-right:1px solid var(--rule)}.ind b{display:block;font:500 28px/1 ui-monospace,monospace}.ind span,h2{font-size:10px;font-weight:700;text-transform:uppercase;color:var(--faint)}h2{margin:28px 0 0;padding:0 0 7px;border-bottom:1px solid var(--rule)}.scroll{overflow:auto}table{width:100%;border-collapse:collapse;background:var(--panel)}th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--rule);vertical-align:top}th{font-size:10px;text-transform:uppercase;color:var(--faint);white-space:nowrap}.num{text-align:right;white-space:nowrap}.state{display:inline-flex;align-items:center;gap:7px;font-weight:650}.state:before{content:"";width:9px;height:9px;border-radius:50%;background:currentColor}.proceeding,.ok{color:var(--ok)}.waiting,.warn{color:var(--warn)}.stopped,.fail{color:var(--bad)}.ended{color:var(--faint)}.empty,.flash{margin:0;background:var(--panel);padding:14px;color:var(--muted)}.flash{border-left:3px solid var(--ok);margin-top:12px}.actions{display:flex;flex-wrap:wrap;gap:5px;justify-content:flex-end}form{margin:0}button{border:1px solid var(--hard);background:var(--panel);color:var(--ink);padding:5px 8px;border-radius:4px;font:inherit;cursor:pointer}button:hover{border-color:var(--ink)}button.danger{color:var(--bad)}details{min-width:180px}details form{display:grid;gap:6px;padding:8px 0}input,select,textarea{width:100%;border:1px solid var(--hard);background:var(--panel);color:var(--ink);padding:6px;border-radius:3px;font:inherit}textarea{min-height:58px;resize:vertical}.doctor{display:flex;flex-wrap:wrap;gap:7px;padding:10px;background:var(--panel)}.note{max-width:420px;white-space:pre-wrap}.hide{display:none}@media(max-width:700px){.wide{display:none}.wrap{padding:0 8px 36px}th,td{padding:8px}.actions{justify-content:flex-start}}
+/* Shared design language with rounce's board: same canvas, same hairline,
+   same three semantic colours, same monospace-led type. The two tools are
+   separate products that answer different questions, and a person running
+   both should still read them as one surface -- which is cheaper to achieve
+   with one set of tokens than with a shared stylesheet neither repo could
+   own. Keep these values in step with internal/dash/style.css in rounce. */
+:root {
+  color-scheme: light dark;
+  --bg: #fbfbfa;
+  --panel: #ffffff;
+  --line: #e6e4e0;
+  --line-soft: #efedea;
+  --fg: #16161a;
+  --muted: #6b6b74;
+  --faint: #96969f;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --bad: #b32428;
+  --radius: 6px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0c0e;
+    --panel: #111316;
+    --line: #23262b;
+    --line-soft: #1a1d21;
+    --fg: #e8eaed;
+    --muted: #8b9198;
+    --faint: #5a6069;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font-family: var(--mono); font-size: 13px; line-height: 1.5;
+  font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1180px; margin: auto; padding: 0 24px 64px; }
+.mono, code { font-family: var(--mono); }
+
+/* The header is a single line: product, place, time. No bar, no logo block --
+   the page should start with state, not with branding. */
+.head { display: flex; align-items: baseline; gap: 16px; padding: 18px 0 16px;
+  border-bottom: 1px solid var(--line); }
+.mark { font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; font-size: 12px; }
+.repo { flex: 1; color: var(--muted); font-size: 12px; word-break: break-all; }
+.clock, .meta { color: var(--faint); font-size: 11px; }
+
+/* Counts read as a row of figures, not as cards. One hairline between them
+   and no boxes: they are a readout, and a box around each would give four
+   numbers the visual weight of four sections. */
+.indications { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 1px; background: var(--line); border: 1px solid var(--line);
+  border-radius: var(--radius); overflow: hidden; margin-top: 20px; }
+.ind { padding: 14px 16px; background: var(--panel); }
+.ind b { display: block; font-size: 26px; font-weight: 500; line-height: 1.1; letter-spacing: -0.02em; }
+.ind span { display: block; margin-top: 5px; font-size: 10px; font-weight: 600;
+  letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); }
+.ind.alert b { color: var(--bad); }
+
+h2 { margin: 34px 0 10px; padding: 0; font-size: 11px; font-weight: 600;
+  letter-spacing: 0.09em; text-transform: uppercase; color: var(--faint); border: none; }
+h2 em { font-style: normal; font-weight: 400; letter-spacing: 0.02em;
+  text-transform: none; color: var(--faint); }
+
+.scroll { overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+table { width: 100%; border-collapse: collapse; background: var(--panel); }
+th, td { text-align: left; padding: 9px 14px; vertical-align: top; }
+th { font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--faint); white-space: nowrap; background: var(--bg);
+  border-bottom: 1px solid var(--line); }
+td { border-top: 1px solid var(--line-soft); }
+tr:first-child td { border-top: none; }
+tbody tr:hover td, table tr:hover td { background: var(--line-soft); }
+.num { text-align: right; white-space: nowrap; }
+
+/* The score is the one number rounce exists to produce, so it anchors its
+   row here the same way it does on rounce's own board. */
+td.num.score, .queue td.num:first-child { font-size: 15px; font-weight: 600; color: var(--fg); }
+
+/* State is a dot and a word, never a filled row. Colour is the second
+   signal, so the page still reads with colour off. */
+.state { display: inline-flex; align-items: center; gap: 7px; font-weight: 500; white-space: nowrap; }
+.state:before { content: ""; width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor; flex: none; }
+.proceeding, .ok { color: var(--ok); }
+.waiting, .warn { color: var(--warn); }
+.stopped, .fail { color: var(--bad); }
+.ended { color: var(--faint); }
+
+.empty, .flash { margin: 0; background: var(--panel); padding: 14px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: var(--radius); font-size: 12.5px; }
+.flash { border-left: 2px solid var(--ok); margin-top: 12px; }
+
+.actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+form { margin: 0; }
+button { border: 1px solid var(--line); background: var(--panel); color: var(--fg);
+  padding: 5px 10px; border-radius: var(--radius); font: inherit; font-size: 12px; cursor: pointer; }
+button:hover { border-color: var(--faint); background: var(--line-soft); }
+button:focus-visible { outline: 2px solid var(--fg); outline-offset: 1px; }
+button.danger { color: var(--bad); }
+button.danger:hover { border-color: var(--bad); }
+details { min-width: 180px; }
+details form { display: grid; gap: 7px; padding: 9px 0; }
+summary { cursor: pointer; color: var(--muted); }
+summary:hover { color: var(--fg); }
+input, select, textarea { width: 100%; border: 1px solid var(--line); background: var(--bg);
+  color: var(--fg); padding: 7px 9px; border-radius: var(--radius); font: inherit; font-size: 12px; }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--faint); }
+textarea { min-height: 58px; resize: vertical; }
+.doctor { display: flex; flex-wrap: wrap; gap: 7px; padding: 12px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--radius); }
+.note { max-width: 420px; white-space: pre-wrap; }
+.hide { display: none; }
+a { color: var(--fg); text-underline-offset: 3px; text-decoration-color: var(--faint); }
+a:hover { text-decoration-color: var(--fg); }
+@media (max-width: 700px) {
+  .wide { display: none; }
+  .wrap { padding: 0 14px 40px; }
+  th, td { padding: 8px 10px; }
+  .actions { justify-content: flex-start; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 .head{flex-wrap:wrap;gap:8px 18px}.repo{min-width:180px}.meta.mono{white-space:nowrap}@media(max-width:700px){.scroll table{min-width:620px}}
 </style>
 <noscript><style nonce="{{.Nonce}}">.control-only{display:none!important}</style></noscript>
@@ -191,7 +315,7 @@ var controlTemplates = template.Must(template.New("control").Parse(`
 {{if .Queue}}<div class="scroll"><table>
 <tr><th class="num">Score</th><th>Item</th><th class="wide">Touches</th></tr>
 {{range .Queue}}<tr>
-  <td class="num mono">{{.Score}}</td>
+  <td class="num mono score">{{.Score}}</td>
   <td><b>{{.Title}}</b><div class="meta mono">{{.ID}} · {{.Type}}</div></td>
   <td class="wide mono">{{if .Paths}}{{.Paths}}{{else}}<span class="meta">not declared</span>{{end}}</td>
 </tr>{{end}}
