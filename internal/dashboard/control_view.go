@@ -99,12 +99,13 @@ var controlTemplates = template.Must(template.New("control").Parse(`
 <title>Interlock</title>
 <link rel="icon" href="data:,">
 <style nonce="{{.Nonce}}">
-/* Shared design language with rounce's board: same canvas, same hairline,
+/* Shared design language with keep's board: same canvas, same hairline,
    same three semantic colours, same monospace-led type. The two tools are
    separate products that answer different questions, and a person running
    both should still read them as one surface -- which is cheaper to achieve
    with one set of tokens than with a shared stylesheet neither repo could
-   own. Keep these values in step with internal/dash/style.css in rounce. */
+   own. These values have to stay in step with keep's own
+   internal/dash/style.css by hand; there is nothing enforcing it. */
 :root {
   color-scheme: light dark;
   --bg: #fbfbfa;
@@ -179,8 +180,8 @@ tr:first-child td { border-top: none; }
 tbody tr:hover td, table tr:hover td { background: var(--line-soft); }
 .num { text-align: right; white-space: nowrap; }
 
-/* The score is the one number rounce exists to produce, so it anchors its
-   row here the same way it does on rounce's own board. */
+/* The score is the one number keep exists to produce, so it anchors its
+   row here the same way it does on keep's own board. */
 td.num.score, .queue td.num:first-child { font-size: 15px; font-weight: 600; color: var(--fg); }
 
 /* State is a dot and a word, never a filled row. Colour is the second
@@ -310,8 +311,8 @@ a:hover { text-decoration-color: var(--fg); }
 </tr>{{end}}
 </table></div>{{else}}<p class="empty">No agents started from here.</p>{{end}}
 
-{{if .HasRounce}}
-<h2>Next <em>from rounce, already filtered against the files held below</em></h2>
+{{if .HasKeep}}
+<h2>Next <em>from keep, already filtered against the files held below</em></h2>
 {{if .Queue}}<div class="scroll"><table>
 <tr><th class="num">Score</th><th>Item</th><th class="wide">Touches</th></tr>
 {{range .Queue}}<tr>
@@ -319,7 +320,7 @@ a:hover { text-decoration-color: var(--fg); }
   <td><b>{{.Title}}</b><div class="meta mono">{{.ID}} · {{.Type}}</div></td>
   <td class="wide mono">{{if .Paths}}{{.Paths}}{{else}}<span class="meta">not declared</span>{{end}}</td>
 </tr>{{end}}
-</table></div>{{else}}<p class="empty">Nothing is workable right now. Either the queue is empty, or every item left touches a file someone is holding &mdash; <code>rounce blocked</code> says which.</p>{{end}}
+</table></div>{{else}}<p class="empty">Nothing is workable right now. Either the queue is empty, or every item left touches a file someone is holding &mdash; <code>keep blocked</code> says which.</p>{{end}}
 {{end}}
 
 <h2>Agents</h2>

@@ -18,9 +18,9 @@ import (
 //
 // `interlock status` is written for a person: durations as prose ("expired
 // 6h16m23s ago"), alignment, and a shape that is free to change whenever the
-// panel does. rounce needs the same facts to answer a different question --
+// panel does. keep needs the same facts to answer a different question --
 // which items are workable right now, given what Interlock is holding -- and
-// parsing prose would couple rounce to Interlock's presentation rather than
+// parsing prose would couple keep to Interlock's presentation rather than
 // to its meaning.
 //
 // `interlock check <path>...` already answers "may I edit this" with an exit
@@ -76,7 +76,7 @@ type leaseJSON struct {
 
 // statusJSONVersion is bumped when a field changes meaning or disappears.
 // A consumer that does not recognise it should say so rather than guess --
-// the same envelope discipline rounce's registry uses.
+// the same envelope discipline keep's registry uses.
 const statusJSONVersion = 1
 
 // runStatusJSON writes the machine-readable status to w.

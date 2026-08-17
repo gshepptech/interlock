@@ -155,8 +155,8 @@ func TestEmptyCommand(t *testing.T) {
 // TestRedirectionToADescriptorOrDeviceIsNotAFile.
 //
 // Found by looking at a real dashboard: two agents were shown holding
-// "~/Projects/rounce/&1" and "~/Projects/rounce/dev/null". Both came from
-// ordinary commands -- `go build ./... 2>&1` and `rounce init >/dev/null`.
+// "~/Projects/keep/&1" and "~/Projects/keep/dev/null". Both came from
+// ordinary commands -- `go build ./... 2>&1` and `keep init >/dev/null`.
 //
 // `2>&1` duplicates a descriptor, so there is no file. /dev/null is a
 // device every agent writes to constantly, so leasing it would mean every
@@ -167,7 +167,7 @@ func TestRedirectionToADescriptorOrDeviceIsNotAFile(t *testing.T) {
 	for _, command := range []string{
 		"go build ./... 2>&1",
 		"go test ./... >/dev/null 2>&1",
-		"rounce init >/dev/null",
+		"keep init >/dev/null",
 		"echo hi >/dev/stderr",
 	} {
 		got := Scan(command)

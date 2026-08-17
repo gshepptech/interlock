@@ -1,33 +1,33 @@
-// Package rounce reads what needs doing, so Interlock can start an agent on it.
+// Package keep reads what needs doing, so Interlock can start an agent on it.
 //
 // # The other direction
 //
-// rounce already reads Interlock: its ready queue hides items whose files are
+// keep already reads Interlock: its ready queue hides items whose files are
 // being edited right now, by shelling out to `interlock status --json`. This is
 // the same join pointing the other way, and it is deliberately built the same
 // way — a subprocess and a CLI contract, not a Go import.
 //
 // The reason is the one both roadmaps state: neither tool depends on the other
 // to be useful. An import would make that false in the direction that matters,
-// because Interlock would stop building without rounce, and Interlock's whole
+// because Interlock would stop building without keep, and Interlock's whole
 // job is keeping agents out of each other's way in repositories that have never
 // heard of a work store.
 //
 // # Every failure is silence
 //
-// rounce missing, failing, slow, or answering with something this cannot read
+// keep missing, failing, slow, or answering with something this cannot read
 // all mean the same thing: Interlock has no work list, and every command that
 // wanted one says so plainly and does nothing else. None of them is an error
-// worth surfacing, because most repositories do not have rounce in them.
+// worth surfacing, because most repositories do not have keep in them.
 //
 // # One asymmetry worth naming
 //
-// `interlock status --json` carries a version integer, and rounce refuses an
-// envelope it does not recognise. `rounce ready --json` is a bare array with no
+// `interlock status --json` carries a version integer, and keep refuses an
+// envelope it does not recognise. `keep ready --json` is a bare array with no
 // envelope, so there is no version to check. This validates the shape instead —
 // an item without an id is not an item — and treats a malformed element as a
 // reason to distrust the whole answer rather than to work from part of it.
-package rounce
+package keep
 
 import (
 	"context"
@@ -42,17 +42,19 @@ import (
 // user waiting on `interlock run --next` should not wait on a wedged database.
 const fetchTimeout = 2 * time.Second
 
-// EnvBinary names the environment variable that overrides how rounce is found.
-// It mirrors rounce's own ROUNCE_INTERLOCK exactly, including "off", so that
+// EnvBinary names the environment variable that overrides how keep is found.
+// It mirrors keep's own KEEP_INTERLOCK exactly, including "off", so that
 // either tool can be told to ignore the other from either side.
 //
-//	unset  — look for `rounce` on $PATH (the normal case)
-//	"off"  — do not consult rounce at all
+//	unset  — look for `keep` on $PATH, then `rounce` (the normal case)
+//	"off"  — do not consult keep at all
 //	other  — use this exact path
-const EnvBinary = "INTERLOCK_ROUNCE"
+//
+// $INTERLOCK_ROUNCE is read when this is unset; see legacyEnvBinary.
+const EnvBinary = "INTERLOCK_KEEP"
 
 // Item is one piece of work, narrowed to what Interlock needs to brief an agent
-// and to name what it is doing. rounce's own record is much wider; carrying
+// and to name what it is doing. keep's own record is much wider; carrying
 // fields nobody reads would invite code that depends on parts of someone else's
 // output that were never promised.
 type Item struct {
@@ -62,17 +64,17 @@ type Item struct {
 	Body       string `json:"body"`
 	Acceptance string `json:"acceptance"`
 	Why        string `json:"why"`
-	// Paths is comma-separated and repo-relative, in rounce's format. It is
+	// Paths is comma-separated and repo-relative, in keep's format. It is
 	// what makes an item's work scope visible before an agent starts.
 	Paths string `json:"paths"`
 	Score int    `json:"score"`
 }
 
-// Ready runs `rounce ready --json` in dir and returns the queue, ranked as
-// rounce ranked it.
+// Ready runs `keep ready --json` in dir and returns the queue, ranked as
+// keep ranked it.
 //
 // The bool reports whether the answer is usable. It is false, with no error,
-// whenever rounce is absent, failed, timed out, or said something this cannot
+// whenever keep is absent, failed, timed out, or said something this cannot
 // read.
 func Ready(ctx context.Context, dir string) ([]Item, bool) {
 	binary, ok := Binary()
@@ -90,7 +92,7 @@ func Ready(ctx context.Context, dir string) ([]Item, bool) {
 	// up on the pipe shortly after the deadline, which is what makes the bound
 	// real rather than nominal.
 	cmd.WaitDelay = 250 * time.Millisecond
-	// Stderr is where rounce explains what it held back, which is diagnostic
+	// Stderr is where keep explains what it held back, which is diagnostic
 	// rather than data. Discarding it keeps a held item's explanation out of
 	// Interlock's own output, where it would read as Interlock's opinion.
 	out, err := cmd.Output()
@@ -112,31 +114,52 @@ func Ready(ctx context.Context, dir string) ([]Item, bool) {
 	return items, true
 }
 
-// Binary resolves the rounce binary, honouring EnvBinary.
+// legacyEnvBinary and legacyName are what keep was called before it was
+// renamed from rounce. Both are still honoured, and the reason is that these
+// two tools are installed separately: whoever upgrades Interlock today may
+// not upgrade keep until next month, and in between the only thing on their
+// $PATH is a working binary called `rounce`. Dropping the old name would
+// turn a rename into an outage for exactly the people who joined the two
+// tools up in the first place.
+//
+// The new name always wins. A machine that has moved on is never dragged
+// back to an old binary it still happens to have lying around.
+const (
+	legacyEnvBinary = "INTERLOCK_ROUNCE"
+	legacyName      = "rounce"
+)
+
+// Binary resolves the keep binary, honouring EnvBinary.
 func Binary() (string, bool) {
-	switch value := os.Getenv(EnvBinary); {
+	value := os.Getenv(EnvBinary)
+	if value == "" {
+		value = os.Getenv(legacyEnvBinary)
+	}
+	switch {
 	case value == "off":
 		return "", false
 	case value != "":
 		return value, true
 	}
-	path, err := exec.LookPath("rounce")
-	if err != nil {
-		return "", false
+	if path, err := exec.LookPath("keep"); err == nil {
+		return path, true
 	}
-	return path, true
+	if path, err := exec.LookPath(legacyName); err == nil {
+		return path, true
+	}
+	return "", false
 }
 
-// Available reports whether rounce can be consulted at all. Commands use it to
+// Available reports whether keep can be consulted at all. Commands use it to
 // tell a user "there is no work list here" rather than "there is no work".
 func Available() bool {
 	_, ok := Binary()
 	return ok
 }
 
-// SplitPaths reads an item's paths field, in rounce's format: comma-separated,
-// repo-relative, whitespace trimmed. The format is rounce's to define, and this
-// reads it the same way rounce's own SplitPaths does.
+// SplitPaths reads an item's paths field, in keep's format: comma-separated,
+// repo-relative, whitespace trimmed. The format is keep's to define, and this
+// reads it the same way keep's own SplitPaths does.
 func SplitPaths(paths string) []string {
 	var out []string
 	for part := range strings.SplitSeq(paths, ",") {

@@ -21,13 +21,13 @@ func renderPanel(t *testing.T, view ControlView) string {
 	return buf.String()
 }
 
-// TestPanelShowsTheQueueWhenRounceIsPresent is the read side of the join on
+// TestPanelShowsTheQueueWhenKeepIsPresent is the read side of the join on
 // the panel: this is where a person sits to watch agents work, and "what
 // should happen next" is the one question the rest of the page cannot
 // answer.
-func TestPanelShowsTheQueueWhenRounceIsPresent(t *testing.T) {
+func TestPanelShowsTheQueueWhenKeepIsPresent(t *testing.T) {
 	view := ControlView{View: View{
-		HasRounce: true,
+		HasKeep: true,
 		Queue: []QueueView{
 			{ID: "rnc-aaa111", Score: 25, Type: "task",
 				Title: "Touch something else", Paths: "cmd/other.go"},
@@ -42,29 +42,29 @@ func TestPanelShowsTheQueueWhenRounceIsPresent(t *testing.T) {
 	}
 }
 
-// TestPanelSaysNothingAboutTheQueueWithoutRounce. Interlock keeps agents
+// TestPanelSaysNothingAboutTheQueueWithoutKeep. Interlock keeps agents
 // apart in repositories that have never heard of a work store, which is most
 // of them. An empty "Next" heading there would imply there is nothing to do,
 // when the truth is that nobody asked.
-func TestPanelSaysNothingAboutTheQueueWithoutRounce(t *testing.T) {
-	page := renderPanel(t, ControlView{View: View{HasRounce: false}})
+func TestPanelSaysNothingAboutTheQueueWithoutKeep(t *testing.T) {
+	page := renderPanel(t, ControlView{View: View{HasKeep: false}})
 
-	if strings.Contains(page, "from rounce") {
-		t.Errorf("the panel mentions rounce with no rounce present:\n%s", page)
+	if strings.Contains(page, "from keep") {
+		t.Errorf("the panel mentions keep with no keep present:\n%s", page)
 	}
 }
 
-// TestPanelDistinguishesAnEmptyQueueFromABlockedOne. rounce hands over a
+// TestPanelDistinguishesAnEmptyQueueFromABlockedOne. keep hands over a
 // queue it has already filtered, so an empty one has two very different
 // causes -- no work left, or all remaining work is held by an agent on this
 // same page. Showing nothing would merge them.
 func TestPanelDistinguishesAnEmptyQueueFromABlockedOne(t *testing.T) {
-	page := renderPanel(t, ControlView{View: View{HasRounce: true, Queue: nil}})
+	page := renderPanel(t, ControlView{View: View{HasKeep: true, Queue: nil}})
 
 	if !strings.Contains(page, "Nothing is workable") {
 		t.Errorf("an empty queue renders no explanation:\n%s", page)
 	}
-	if !strings.Contains(page, "rounce blocked") {
+	if !strings.Contains(page, "keep blocked") {
 		t.Errorf("the empty-queue text does not say how to tell the two causes apart:\n%s", page)
 	}
 }
@@ -74,7 +74,7 @@ func TestPanelDistinguishesAnEmptyQueueFromABlockedOne(t *testing.T) {
 // template escapes them; this is the assertion that it still does.
 func TestPanelEscapesQueueText(t *testing.T) {
 	view := ControlView{View: View{
-		HasRounce: true,
+		HasKeep: true,
 		Queue: []QueueView{{
 			ID: "rnc-bbb222", Score: 1, Type: "task",
 			Title: `<script>alert(1)</script>`,

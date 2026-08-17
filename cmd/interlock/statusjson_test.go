@@ -57,8 +57,8 @@ func statusJSONFixture(t *testing.T, held string) statusJSON {
 	return got
 }
 
-// TestStatusJSONReportsHeldPaths is the contract rounce reads: which paths
-// are held, by whom. Without it rounce would have to parse `interlock
+// TestStatusJSONReportsHeldPaths is the contract keep reads: which paths
+// are held, by whom. Without it keep would have to parse `interlock
 // status`'s prose, which couples it to Interlock's presentation rather than
 // to its meaning.
 func TestStatusJSONReportsHeldPaths(t *testing.T) {
@@ -72,7 +72,7 @@ func TestStatusJSONReportsHeldPaths(t *testing.T) {
 	}
 	l := got.Leases[0]
 	if l.Path != "internal/shared.go" {
-		t.Errorf("path = %q, want the repo-relative path rounce compares against", l.Path)
+		t.Errorf("path = %q, want the repo-relative path keep compares against", l.Path)
 	}
 	if l.Agent != "claude" || l.SessionID != "sess-1" {
 		t.Errorf("holder = %q/%q, want claude/sess-1 -- a board has to name who is holding it", l.Agent, l.SessionID)
