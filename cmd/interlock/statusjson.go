@@ -75,8 +75,8 @@ type leaseJSON struct {
 }
 
 // statusJSONVersion is bumped when a field changes meaning or disappears.
-// A consumer that does not recognise it should say so rather than guess --
-// the same envelope discipline keep's registry uses.
+// A consumer that does not recognise it should say so rather than guess.
+// This is the same envelope discipline keep's registry uses.
 const statusJSONVersion = 1
 
 // runStatusJSON writes the machine-readable status to w.
