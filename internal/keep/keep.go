@@ -5,12 +5,13 @@
 // keep already reads Interlock: its ready queue hides items whose files are
 // being edited right now, by shelling out to `interlock status --json`. This is
 // the same join pointing the other way, and it is deliberately built the same
-// way — a subprocess and a CLI contract, not a Go import.
+// way: a subprocess and a CLI contract, not a Go import.
 //
-// The reason is that neither tool should depend on the other to be useful. An import would make that false in the direction that matters,
-// because Interlock would stop building without keep, and Interlock's whole
-// job is keeping agents out of each other's way in repositories that have never
-// heard of a work store.
+// The reason is that neither tool should depend on the other to be useful.
+// An import would make that false in the direction that matters, because
+// Interlock would stop building without keep, and Interlock's whole job is
+// keeping agents out of each other's way in repositories that have never heard
+// of a work store.
 //
 // # Every failure is silence
 //
@@ -23,8 +24,8 @@
 //
 // `interlock status --json` carries a version integer, and keep refuses an
 // envelope it does not recognise. `keep ready --json` is a bare array with no
-// envelope, so there is no version to check. This validates the shape instead —
-// an item without an id is not an item — and treats a malformed element as a
+// envelope, so there is no version to check. This validates the shape instead
+// (an item without an id is not an item) and treats a malformed element as a
 // reason to distrust the whole answer rather than to work from part of it.
 package keep
 
@@ -45,9 +46,9 @@ const fetchTimeout = 2 * time.Second
 // It mirrors keep's own KEEP_INTERLOCK exactly, including "off", so that
 // either tool can be told to ignore the other from either side.
 //
-//	unset  — look for `keep` on $PATH (the normal case)
-//	"off"  — do not consult keep at all
-//	other  — use this exact path
+//	unset  - look for `keep` on $PATH (the normal case)
+//	"off"  - do not consult keep at all
+//	other  - use this exact path
 const EnvBinary = "INTERLOCK_KEEP"
 
 // Item is one piece of work, narrowed to what Interlock needs to brief an agent
@@ -85,7 +86,7 @@ func Ready(ctx context.Context, dir string) ([]Item, bool) {
 	cmd.Dir = dir
 	// Killing the process on timeout is not enough. Anything it spawned
 	// inherits the output pipe, so the read keeps blocking after the parent is
-	// gone — a two-second bound that measured thirty in a test. WaitDelay gives
+	// gone: a two-second bound that measured thirty in a test. WaitDelay gives
 	// up on the pipe shortly after the deadline, which is what makes the bound
 	// real rather than nominal.
 	cmd.WaitDelay = 250 * time.Millisecond

@@ -190,8 +190,8 @@ type actionSpec struct {
 // serveRunLog returns a bounded, escaped fragment of one stream.
 //
 // It returns HTML rather than the file, which is the point: the bytes came out
-// of a language model, and everything between the file and the page — the
-// bound, the escape-sequence stripping, the redaction, the HTML escaping — is
+// of a language model, and everything between the file and the page (the
+// bound, the escape-sequence stripping, the redaction, the HTML escaping) is
 // applied here rather than trusted to the caller.
 func (s *Server) serveRunLog(w http.ResponseWriter, r *http.Request) {
 	if s.runs == nil {

@@ -186,8 +186,8 @@ func (s *Supervisor) link(record Record) []string {
 	if team := record.Spec.Options.Team; team != "" {
 		link = append(link, "INTERLOCK_TEAM="+team)
 	}
-	// The agent is told what it is working on, so anything it runs — including
-	// a work-store command — can name the item without being passed it again.
+	// The agent is told what it is working on, so anything it runs (including
+	// a work-store command) can name the item without being passed it again.
 	if item := record.Spec.Options.Item; item != "" {
 		link = append(link, "INTERLOCK_ITEM="+item)
 	}
