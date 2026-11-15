@@ -139,7 +139,7 @@ func TestAppendRejectsUntypedControlFields(t *testing.T) {
 	}
 }
 
-func TestMixedJournalPreventsPhaseZeroTrimAndPreservesControlOnPhaseOneTrim(t *testing.T) {
+func TestMixedJournalIsLeftAloneByOlderBinariesAndKeepsControlRecordsOnTrim(t *testing.T) {
 	now := time.Now()
 	s := store(t, &now)
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
