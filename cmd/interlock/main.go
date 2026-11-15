@@ -38,6 +38,7 @@ import (
 	"github.com/gshepptech/interlock/internal/managedrun"
 	"github.com/gshepptech/interlock/internal/observed"
 	"github.com/gshepptech/interlock/internal/remedy"
+	"github.com/gshepptech/interlock/internal/runner"
 	"github.com/gshepptech/interlock/internal/session"
 	"github.com/gshepptech/interlock/internal/shellscan"
 	"github.com/gshepptech/interlock/internal/territory"
@@ -1691,18 +1692,6 @@ func runCheck(args []string) int {
 	return exitOK
 }
 
-// codexBypassFlag makes Codex run hooks without the persisted trust it no
-// longer offers any way to grant.
-const codexBypassFlag = "--dangerously-bypass-hook-trust"
-
-// codexSearchPaths are where the binary has actually lived. Codex moved from
-// its own bundle into the ChatGPT app, so a single hard-coded path would have
-// broken silently the week it moved.
-var codexSearchPaths = []string{
-	"/Applications/ChatGPT.app/Contents/Resources/codex",
-	"/Applications/Codex.app/Contents/Resources/codex",
-}
-
 // runCodex launches Codex with hook trust disabled, so its hooks run and its
 // writes are blocked outright rather than relying on it to check first.
 //
@@ -1768,7 +1757,7 @@ func runCodex(args []string) int {
 	// Replace this process rather than wrapping it. Codex is interactive, and a
 	// parent sitting in the middle would have to forward the terminal, signals
 	// and exit status correctly to gain nothing.
-	argv := append([]string{binary, codexBypassFlag}, args...)
+	argv := append([]string{binary, runner.CodexHookTrustFlag}, args...)
 	// Codex's hooks will be live, so its own claims must not make its own
 	// check refuse its own work.
 	env := append(os.Environ(), "INTERLOCK_AGENT=codex")
@@ -1789,7 +1778,7 @@ func findCodex() (string, error) {
 	if found, err := exec.LookPath("codex"); err == nil {
 		return found, nil
 	}
-	for _, candidate := range codexSearchPaths {
+	for _, candidate := range runner.CodexSearchPaths {
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate, nil
 		}
@@ -1797,5 +1786,5 @@ func findCodex() (string, error) {
 	return "", fmt.Errorf(
 		"cannot find the codex binary. Looked on PATH and in %s.\n"+
 			"Set INTERLOCK_CODEX_BIN to its location.",
-		strings.Join(codexSearchPaths, ", "))
+		strings.Join(runner.CodexSearchPaths, ", "))
 }
