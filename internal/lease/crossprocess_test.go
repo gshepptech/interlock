@@ -16,8 +16,8 @@ import (
 // deployed behaviour. This one does.
 
 const (
-	envDir     = "AGENTCOORD_TEST_LEASE_DIR"
-	envSession = "AGENTCOORD_TEST_LEASE_SESSION"
+	envDir     = "INTERLOCK_TEST_LEASE_DIR"
+	envSession = "INTERLOCK_TEST_LEASE_SESSION"
 )
 
 // TestHelperAcquireOnce is a child process, not a test. It skips unless the
