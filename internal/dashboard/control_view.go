@@ -144,7 +144,7 @@ body {
 .wrap { max-width: 1180px; margin: auto; padding: 0 24px 64px; }
 .mono, code { font-family: var(--mono); }
 
-/* The header is a single line: product, place, time. No bar, no logo block --
+/* The header is a single line: product, place, time. No bar, no logo block:
    the page should start with state, not with branding. */
 .head { display: flex; align-items: baseline; gap: 16px; padding: 18px 0 16px;
   border-bottom: 1px solid var(--line); }
