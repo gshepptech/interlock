@@ -22,14 +22,14 @@ func fakeKeep(t *testing.T, script string) {
 
 func TestReadyReturnsTheQueueAsRanked(t *testing.T) {
 	fakeKeep(t, `cat <<'JSON'
-[{"id":"rnc-1","type":"task","title":"First","score":31,"paths":"a.go, b.go"},
- {"id":"rnc-2","type":"bug","title":"Second","score":12}]
+[{"id":"kp-1","type":"task","title":"First","score":31,"paths":"a.go, b.go"},
+ {"id":"kp-2","type":"bug","title":"Second","score":12}]
 JSON`)
 	items, ok := Ready(context.Background(), t.TempDir())
 	if !ok || len(items) != 2 {
 		t.Fatalf("Ready = %#v ok=%v", items, ok)
 	}
-	if items[0].ID != "rnc-1" || items[1].ID != "rnc-2" {
+	if items[0].ID != "kp-1" || items[1].ID != "kp-2" {
 		t.Fatalf("order changed: %#v", items)
 	}
 	if got := SplitPaths(items[0].Paths); len(got) != 2 || got[1] != "b.go" {
@@ -47,7 +47,7 @@ func TestEveryFailureIsSilence(t *testing.T) {
 		"output is not json":   "echo 'keep: something went wrong'",
 		"output is an object":  `echo '{"items":[]}'`,
 		"an item has no id":    `echo '[{"title":"nameless"}]'`,
-		"one bad item spoils":  `echo '[{"id":"rnc-1"},{"title":"nameless"}]'`,
+		"one bad item spoils":  `echo '[{"id":"kp-1"},{"title":"nameless"}]'`,
 		"it never says a word": "sleep 30",
 	}
 	for name, script := range cases {
@@ -69,14 +69,14 @@ func TestEveryFailureIsSilence(t *testing.T) {
 // parsed would mean starting an agent on a brief assembled from a shape nobody
 // promised.
 func TestAPartlyReadableAnswerIsNotUsedAtAll(t *testing.T) {
-	fakeKeep(t, `echo '[{"id":"rnc-1","title":"Real"},{"title":"Broken"}]'`)
+	fakeKeep(t, `echo '[{"id":"kp-1","title":"Real"},{"title":"Broken"}]'`)
 	if items, ok := Ready(context.Background(), t.TempDir()); ok {
 		t.Fatalf("Ready = %#v ok=%v", items, ok)
 	}
 }
 
 func TestOffDisablesTheJoinFromThisSide(t *testing.T) {
-	fakeKeep(t, `echo '[{"id":"rnc-1","title":"Real"}]'`)
+	fakeKeep(t, `echo '[{"id":"kp-1","title":"Real"}]'`)
 	t.Setenv(EnvBinary, "off")
 	if _, ok := Ready(context.Background(), t.TempDir()); ok {
 		t.Fatal("the queue was consulted with the join turned off")
@@ -90,7 +90,7 @@ func TestOffDisablesTheJoinFromThisSide(t *testing.T) {
 // about the work; everything about keep should not.
 func TestBriefIsWorkAndNothingElse(t *testing.T) {
 	item := Item{
-		ID: "rnc-1", Type: "task", Score: 31,
+		ID: "kp-1", Type: "task", Score: 31,
 		Title: "Refactor the shared helper", Body: "It has three callers.",
 		Acceptance: "Tests pass.", Why: "It blocks the migration.",
 		Paths: "internal/shared.go",
@@ -107,7 +107,7 @@ func TestBriefIsWorkAndNothingElse(t *testing.T) {
 	}
 	// Identifiers and scores are how a work store talks about work, not how a
 	// person briefs a colleague.
-	for _, unwanted := range []string{"rnc-1", "31", "task"} {
+	for _, unwanted := range []string{"kp-1", "31", "task"} {
 		if strings.Contains(brief, unwanted) {
 			t.Errorf("brief leaked %q:\n%s", unwanted, brief)
 		}
@@ -120,7 +120,7 @@ func TestBriefIsWorkAndNothingElse(t *testing.T) {
 }
 
 func TestABareItemStillBriefs(t *testing.T) {
-	brief := Item{ID: "rnc-2", Title: "Just a title"}.Brief()
+	brief := Item{ID: "kp-2", Title: "Just a title"}.Brief()
 	if brief != "Just a title" {
 		t.Fatalf("brief = %q", brief)
 	}

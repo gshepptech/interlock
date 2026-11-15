@@ -29,13 +29,13 @@ func TestPanelShowsTheQueueWhenKeepIsPresent(t *testing.T) {
 	view := ControlView{View: View{
 		HasKeep: true,
 		Queue: []QueueView{
-			{ID: "rnc-aaa111", Score: 25, Type: "task",
+			{ID: "kp-aaa111", Score: 25, Type: "task",
 				Title: "Touch something else", Paths: "cmd/other.go"},
 		},
 	}}
 
 	page := renderPanel(t, view)
-	for _, want := range []string{"rnc-aaa111", "25", "Touch something else", "cmd/other.go"} {
+	for _, want := range []string{"kp-aaa111", "25", "Touch something else", "cmd/other.go"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("the panel does not show %q:\n%s", want, page)
 		}
@@ -76,7 +76,7 @@ func TestPanelEscapesQueueText(t *testing.T) {
 	view := ControlView{View: View{
 		HasKeep: true,
 		Queue: []QueueView{{
-			ID: "rnc-bbb222", Score: 1, Type: "task",
+			ID: "kp-bbb222", Score: 1, Type: "task",
 			Title: `<script>alert(1)</script>`,
 			Paths: `"><img src=x onerror=alert(1)>`,
 		}},
