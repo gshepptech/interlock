@@ -102,7 +102,7 @@ var controlTemplates = template.Must(template.New("control").Parse(`
 /* Shared design language with keep's board: same canvas, same hairline,
    same three semantic colours, same monospace-led type. The two tools are
    separate products that answer different questions, and a person running
-   both should still read them as one surface -- which is cheaper to achieve
+   both should still read them as one surface. That is cheaper to achieve
    with one set of tokens than with a shared stylesheet neither repo could
    own. These values have to stay in step with keep's own
    internal/dash/style.css by hand; there is nothing enforcing it. */
