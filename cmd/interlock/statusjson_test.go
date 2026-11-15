@@ -114,7 +114,7 @@ func TestStatusJSONUsesEmptyArraysNotNull(t *testing.T) {
 	}
 }
 
-// TestStatusJSONExitsZeroWithoutJSONFlag guards the dispatch: adding a
+// TestStatusJSONRejectsUnknownArguments guards the dispatch: adding a
 // machine form must not change what plain `interlock status` does, and a
 // stray argument must still be refused rather than silently ignored.
 func TestStatusJSONRejectsUnknownArguments(t *testing.T) {
