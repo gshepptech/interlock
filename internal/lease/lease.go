@@ -252,11 +252,10 @@ func (s *Store) Release(sessionID string) (int, error) {
 
 // Prune deletes leases that have expired.
 //
-// Nothing used to remove them. A lease is written on every file an agent
-// touches and only deleted when its session ends tidily, so a repository in
-// daily use accumulates one file per file ever edited. A week of real work left
-// 109 expired leases behind two live ones, and every session start, status call
-// and dashboard render read all 111 to find the 2 that mattered.
+// A lease is written on every file an agent touches and only deleted when its
+// session ends tidily, so without pruning a repository in daily use
+// accumulates one file per file ever edited, and every session start, status
+// call and dashboard render reads all of them to find the few that matter.
 //
 // This runs under the same lock as acquisition and only removes leases already
 // past their hold, so a live claim can never be pruned out from under its
@@ -351,11 +350,11 @@ func (s *Store) Inspect() ([]state.Issue, error) {
 
 // live reports whether a lease still counts, on time to live alone.
 //
-// An earlier version also stole a lease whose recorded process was gone, to
-// reclaim faster after a crash. That was wrong, and a cross-process test caught
-// it: the hook is a short-lived process that exits immediately after acquiring,
-// so its pid is dead within milliseconds and every lease looked abandoned. Three
-// of twelve racing processes were each granted the same file.
+// It deliberately does not reclaim a lease whose recorded process is gone. The
+// hook is a short-lived process that exits immediately after acquiring, so its
+// pid is dead within milliseconds; treating that as abandonment would make
+// every lease stealable, and the cross-process test shows racing processes
+// each being granted the same file when it does.
 //
 // The pid of the hook is not the pid of the agent session, and there is no
 // reliable way to reach the latter from inside a hook: the hook may be spawned

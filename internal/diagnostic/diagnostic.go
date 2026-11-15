@@ -671,12 +671,11 @@ func inspectState(root string) ([]state.Issue, error) {
 // supersededCheck reports hooks left behind in a file this tool no longer
 // installs into.
 //
-// Interlock used to write Claude Code's hooks into .claude/settings.json, which
-// is the shareable file people commit. Every hook it writes names an absolute
-// path to one machine's binary, so committing them makes every teammate run a
-// missing command on every tool call. It writes settings.local.json now, and an
-// install left in the old file keeps firing with nothing in the new one to
-// explain it.
+// Hooks belong in .claude/settings.local.json, not the shareable
+// settings.json people commit: every hook names an absolute path to one
+// machine's binary, so committing them makes every teammate run a missing
+// command on every tool call. Hooks found in settings.json keep firing with
+// nothing in the local file to explain them, so they are reported.
 func supersededCheck(target install.Target) Check {
 	subject := target.Agent + " old hooks"
 	found, err := install.Superseded(target)

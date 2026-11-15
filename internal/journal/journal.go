@@ -34,8 +34,8 @@ const Keep = 200
 const trimAt = 2 * Keep
 
 // ControlVersion is journal-specific. Other stores remain on state version 1.
-// Phase 0 treats these records as future state and therefore refuses to trim a
-// mixed journal rather than deleting audit history it cannot interpret.
+// A binary that only knows state version 1 treats these records as future state
+// and refuses to trim a mixed journal rather than delete history it cannot read.
 //
 // Version 3 adds the managed-run actions. An older binary reading a v3 row sees
 // future state and declines to trim the file, which is the behaviour that keeps

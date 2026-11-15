@@ -8,8 +8,8 @@ var codexSearchPaths = []string{
 	"/Applications/Codex.app/Contents/Resources/codex",
 }
 
-// codexHookTrustFlag makes Codex run its hooks without the persisted trust it
-// no longer offers any way to grant.
+// codexHookTrustFlag makes Codex run its hooks without persisted trust, which
+// older Codex releases do not honour.
 //
 // It reads like the sort of flag this package refuses to add, and it is worth
 // being precise about why it is not. It does not bypass Codex's sandbox or its

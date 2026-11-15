@@ -1,12 +1,13 @@
 // Package instructions maintains Interlock's section in a repository's agent
 // instructions file.
 //
-// This is the only channel into Codex that still works. Codex requires hook
-// trust it no longer offers any way to grant, but it reads AGENTS.md on every
-// session and it can run commands, which together give the same loop: tell it
-// what the state is, let it decide. Proven against a real session, which ran
-// the check itself, found a file held by another agent, and refused to edit it
-// while editing a free file in the same repository.
+// Hooks refuse a write after an agent has decided to make it. Instructions let
+// an agent find out first: Codex and Claude Code both read AGENTS.md on every
+// session and can run commands, so the block tells them to run
+// `interlock check` before editing. A real Codex session ran the check, found a
+// file held by another agent, and left it alone while editing a free file in
+// the same repository. On Codex releases that do not honour hook trust, this is
+// the only channel there is.
 //
 // The file belongs to the user and usually already says things that matter, so
 // Interlock owns exactly one delimited block and never touches a byte outside

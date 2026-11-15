@@ -427,9 +427,8 @@ func TestDescribeNamesTheHolderAndHowLong(t *testing.T) {
 	}
 }
 
-// Nothing used to delete expired leases, so a repository in daily use grew one
-// file per file ever edited. A week of real work left 109 expired leases behind
-// 2 live ones, and every read walked all 111.
+// Without pruning, a repository in daily use grows one lease file per file ever
+// edited, and every read walks all of them.
 func TestPruneRemovesExpiredButKeepsLive(t *testing.T) {
 	now := time.Now()
 	s := store(t, time.Minute, &now)

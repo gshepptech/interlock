@@ -12,7 +12,7 @@ import (
 
 // These tests start real agents. The agent is a fake, but everything around it
 // is real: the binary, the detached supervisor, the process group, the socket,
-// and the files on disk. That is the point. The failure this whole phase risks
+// and the files on disk. That is the point. The failure managed runs risk
 // is a run that looks controlled and is not, and no amount of package-level
 // testing can tell you whether a process actually detached.
 

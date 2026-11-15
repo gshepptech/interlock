@@ -62,7 +62,7 @@ func Plan(root string) []Target {
 			// settings.local.json, not settings.json. Every hook we write names
 			// an absolute path to this machine's binary, and settings.json is
 			// the shareable file people commit. Committing a hook that points
-			// at /Users/somebody/go/bin/interlock means everyone who pulls the
+			// at /home/somebody/go/bin/interlock means everyone who pulls the
 			// repo runs a missing command on every tool call. settings.local.json
 			// is the file Claude Code provides for exactly this.
 			File:       filepath.Join(root, ".claude", "settings.local.json"),
@@ -1035,10 +1035,8 @@ func sortStrings(s []string) { slices.Sort(s) }
 
 // UntrustCodexConfig removes the hook trust this tool added for a repository.
 //
-// Uninstalling used to leave these behind, so every repository Interlock was
-// ever installed into kept an entry in the user's global Codex config forever,
-// including throwaway ones. Sixty stale entries pointing at deleted directories
-// is what prompted this.
+// Without this, every repository Interlock was ever installed into, including
+// throwaway ones, would keep an entry in the user's global Codex config forever.
 //
 // Project trust is deliberately left alone. Interlock may have set it, but the
 // user may equally have trusted that repository for their own reasons, and

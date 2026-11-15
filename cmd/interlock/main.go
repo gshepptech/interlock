@@ -1599,9 +1599,10 @@ func markObserved(cfg *config.Config, agent string) {
 // runCheck answers one question for an agent that cannot be intercepted: may I
 // edit this file right now.
 //
-// It exists because Codex requires hook trust it no longer offers a way to
-// grant, so nothing can stop its writes. What it will do is follow the
-// repository's instructions, and those instructions point here. The contract is
+// An agent that is told before it writes does better than one refused after,
+// and on Codex releases that do not honour hook trust nothing else can stop
+// its writes. Agents follow the repository's instructions, and those
+// instructions point here. The contract is
 // the exit code, because that is what survives being read by a model: 0 free,
 // 2 held, and never anything else for a question we could not answer.
 func runCheck(args []string) int {

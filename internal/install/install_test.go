@@ -729,10 +729,8 @@ func TestClaudeMatcherCoversEveryWritingTool(t *testing.T) {
 	}
 }
 
-// Uninstalling used to leave hook trust behind, so every repository Interlock
-// was ever installed into kept an entry in the user's global Codex config
-// forever. Sixty stale entries pointing at deleted directories is what prompted
-// this test.
+// Uninstall must withdraw hook trust, or every repository Interlock was ever
+// installed into keeps an entry in the user's global Codex config forever.
 func TestUninstallWithdrawsCodexHookTrust(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "config.toml")
