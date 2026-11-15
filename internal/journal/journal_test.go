@@ -166,9 +166,9 @@ func TestMixedJournalPreventsPhaseZeroTrimAndPreservesControlOnPhaseOneTrim(t *t
 		t.Fatalf("seed mixed journal: %v", err)
 	}
 
-	// This duplicates Phase 0's compatibility decision: version 2 is future,
+	// An older binary's compatibility decision: version 2 is future,
 	// so its trim path must leave the entire file alone.
-	phaseZeroWouldTrim := true
+	olderBinaryWouldTrim := true
 	for line := range strings.SplitSeq(body.String(), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -180,17 +180,17 @@ func TestMixedJournalPreventsPhaseZeroTrimAndPreservesControlOnPhaseOneTrim(t *t
 		if err := state.Validate("journal", s.file, candidate.Version); err != nil {
 			var future *state.UnsupportedVersionError
 			if errors.As(err, &future) {
-				phaseZeroWouldTrim = false
+				olderBinaryWouldTrim = false
 				break
 			}
 		}
 	}
-	if phaseZeroWouldTrim {
-		t.Fatal("Phase 0 contract would trim a journal containing control records")
+	if olderBinaryWouldTrim {
+		t.Fatal("an older binary would trim a journal containing control records")
 	}
 
 	if err := s.trimIfLong(); err != nil {
-		t.Fatalf("Phase 1 trim: %v", err)
+		t.Fatalf("trim: %v", err)
 	}
 	entries, err := s.Recent(Keep + 1)
 	if err != nil {
