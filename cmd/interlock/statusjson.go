@@ -18,9 +18,9 @@ import (
 //
 // `interlock status` is written for a person: durations as prose ("expired
 // 6h16m23s ago"), alignment, and a shape that is free to change whenever the
-// panel does. keep needs the same facts to answer a different question --
-// which items are workable right now, given what Interlock is holding -- and
-// parsing prose would couple keep to Interlock's presentation rather than
+// panel does. keep needs the same facts to answer a different question:
+// which items are workable right now, given what Interlock is holding. Parsing
+// prose would couple keep to Interlock's presentation rather than
 // to its meaning.
 //
 // `interlock check <path>...` already answers "may I edit this" with an exit
@@ -143,7 +143,7 @@ func runStatusJSON(w io.Writer, cfg *config.Config, now time.Time) int {
 
 // runStatusCmd dispatches `interlock status` between its human and machine
 // forms. The flag is matched literally, matching the dispatch shape the rest
-// of this file uses -- there is no flag package in play here and no ambiguity
+// of this file uses. There is no flag package in play here and no ambiguity
 // to resolve, since status takes no positional argument at all.
 func runStatusCmd(args []string) int {
 	wantJSON := false

@@ -1134,7 +1134,7 @@ func dashboardLoad(cfg *config.Config) controlhttp.Load {
 
 		// The read side of the join. keep has already excluded whatever
 		// collides with the leases this same page shows below, so the panel
-		// renders the queue rather than re-deriving it -- two answers to
+		// renders the queue rather than re-deriving it. Two answers to
 		// "what is workable" would drift, and the drift would show as a
 		// panel recommending work it is itself reporting as held.
 		//

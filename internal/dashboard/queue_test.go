@@ -56,7 +56,7 @@ func TestPanelSaysNothingAboutTheQueueWithoutKeep(t *testing.T) {
 
 // TestPanelDistinguishesAnEmptyQueueFromABlockedOne. keep hands over a
 // queue it has already filtered, so an empty one has two very different
-// causes -- no work left, or all remaining work is held by an agent on this
+// causes: no work left, or all remaining work is held by an agent on this
 // same page. Showing nothing would merge them.
 func TestPanelDistinguishesAnEmptyQueueFromABlockedOne(t *testing.T) {
 	page := renderPanel(t, ControlView{View: View{HasKeep: true, Queue: nil}})
@@ -90,7 +90,7 @@ func TestPanelEscapesQueueText(t *testing.T) {
 		t.Errorf("a queue path rendered as live markup:\n%s", page)
 	}
 	// Present as inert text, so the escaping is doing the work rather than
-	// the field being dropped -- a dropped field would pass vacuously.
+	// the field being dropped; a dropped field would pass vacuously.
 	if !strings.Contains(page, "alert(1)") {
 		t.Errorf("the hostile text is absent entirely; this test would pass vacuously:\n%s", page)
 	}

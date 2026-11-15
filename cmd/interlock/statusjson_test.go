@@ -17,7 +17,7 @@ import (
 //
 // It writes a real lease through lease.Store rather than hand-writing the
 // file, so the shape this test locks is the one the real acquire path
-// produces -- a hand-built fixture would keep passing after a change to how
+// produces. A hand-built fixture would keep passing after a change to how
 // leases are stored.
 func statusJSONFixture(t *testing.T, held string) statusJSON {
 	t.Helper()
