@@ -126,20 +126,13 @@ func TestABareItemStillBriefs(t *testing.T) {
 	}
 }
 
-// TestTheOldNameStillWorks covers the compatibility path the rename created.
-//
-// The two tools are installed separately, so there is a window -- possibly a
-// long one -- where a person has upgraded Interlock and not keep, and the only
-// thing on their $PATH is a working binary still called `rounce`. The rename
-// is a change to what the other tool is called, not to what it does, and it
-// should not take the join down while someone gets around to the second
-// `go install`.
+// TestBinaryLookup covers how keep is found.
 //
 // $PATH is rewritten to a directory this test owns rather than mocked, so the
 // thing under test is the real exec.LookPath and not a stand-in for it. That
 // matters: the bug this guards against is a lookup that finds nothing, and a
 // fake lookup cannot fail the way a real one does.
-func TestTheOldNameStillWorks(t *testing.T) {
+func TestBinaryLookup(t *testing.T) {
 	// EnvBinary short-circuits the whole search, so it must be cleared or
 	// none of these cases reach the code they are about. t.Setenv registers
 	// the restore; Unsetenv is what makes it genuinely absent.
@@ -164,58 +157,34 @@ func TestTheOldNameStillWorks(t *testing.T) {
 		return dir
 	}
 
-	t.Run("only the old binary is installed", func(t *testing.T) {
+	t.Run("keep on $PATH is found", func(t *testing.T) {
 		clear(t, EnvBinary)
-		clear(t, legacyEnvBinary)
-		dir := onPath(t, legacyName)
-		got, ok := Binary()
-		if !ok || got != filepath.Join(dir, legacyName) {
-			t.Fatalf("Binary() = %q, %v; want the %s on $PATH", got, ok, legacyName)
-		}
-	})
-
-	t.Run("the new name wins when both are installed", func(t *testing.T) {
-		clear(t, EnvBinary)
-		clear(t, legacyEnvBinary)
-		dir := onPath(t, "keep", legacyName)
+		dir := onPath(t, "keep")
 		got, ok := Binary()
 		if !ok || got != filepath.Join(dir, "keep") {
-			t.Fatalf("Binary() = %q, %v; want keep to win over %s", got, ok, legacyName)
+			t.Fatalf("Binary() = %q, %v; want the keep on $PATH", got, ok)
 		}
 	})
 
-	t.Run("the old override is honoured", func(t *testing.T) {
-		clear(t, EnvBinary)
-		onPath(t) // nothing at all on $PATH, so only the override can answer
-		t.Setenv(legacyEnvBinary, "/somewhere/rounce")
+	t.Run("the override wins over $PATH", func(t *testing.T) {
+		onPath(t, "keep")
+		t.Setenv(EnvBinary, "/somewhere/keep")
 		got, ok := Binary()
-		if !ok || got != "/somewhere/rounce" {
-			t.Fatalf("Binary() = %q, %v; want the %s override", got, ok, legacyEnvBinary)
+		if !ok || got != "/somewhere/keep" {
+			t.Fatalf("Binary() = %q, %v; want the %s override", got, ok, EnvBinary)
 		}
 	})
 
-	t.Run("the old override can still turn the join off", func(t *testing.T) {
-		clear(t, EnvBinary)
-		onPath(t, "keep", legacyName)
-		t.Setenv(legacyEnvBinary, "off")
+	t.Run("the override can turn the join off", func(t *testing.T) {
+		onPath(t, "keep")
+		t.Setenv(EnvBinary, "off")
 		if _, ok := Binary(); ok {
-			t.Fatal("the join stayed on with the old variable set to off")
+			t.Fatal("the join stayed on with the variable set to off")
 		}
 	})
 
-	t.Run("the new override wins over the old", func(t *testing.T) {
-		onPath(t)
-		t.Setenv(EnvBinary, "/new/keep")
-		t.Setenv(legacyEnvBinary, "/old/rounce")
-		got, _ := Binary()
-		if got != "/new/keep" {
-			t.Fatalf("Binary() = %q; want the %s value to win", got, EnvBinary)
-		}
-	})
-
-	t.Run("neither installed is still silence", func(t *testing.T) {
+	t.Run("not installed is silence", func(t *testing.T) {
 		clear(t, EnvBinary)
-		clear(t, legacyEnvBinary)
 		onPath(t)
 		if _, ok := Binary(); ok {
 			t.Fatal("Binary reported a binary with an empty $PATH")

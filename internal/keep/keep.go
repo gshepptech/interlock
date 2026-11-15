@@ -7,8 +7,7 @@
 // the same join pointing the other way, and it is deliberately built the same
 // way — a subprocess and a CLI contract, not a Go import.
 //
-// The reason is the one both roadmaps state: neither tool depends on the other
-// to be useful. An import would make that false in the direction that matters,
+// The reason is that neither tool should depend on the other to be useful. An import would make that false in the direction that matters,
 // because Interlock would stop building without keep, and Interlock's whole
 // job is keeping agents out of each other's way in repositories that have never
 // heard of a work store.
@@ -46,11 +45,9 @@ const fetchTimeout = 2 * time.Second
 // It mirrors keep's own KEEP_INTERLOCK exactly, including "off", so that
 // either tool can be told to ignore the other from either side.
 //
-//	unset  — look for `keep` on $PATH, then `rounce` (the normal case)
+//	unset  — look for `keep` on $PATH (the normal case)
 //	"off"  — do not consult keep at all
 //	other  — use this exact path
-//
-// $INTERLOCK_ROUNCE is read when this is unset; see legacyEnvBinary.
 const EnvBinary = "INTERLOCK_KEEP"
 
 // Item is one piece of work, narrowed to what Interlock needs to brief an agent
@@ -114,27 +111,9 @@ func Ready(ctx context.Context, dir string) ([]Item, bool) {
 	return items, true
 }
 
-// legacyEnvBinary and legacyName are what keep was called before it was
-// renamed from rounce. Both are still honoured, and the reason is that these
-// two tools are installed separately: whoever upgrades Interlock today may
-// not upgrade keep until next month, and in between the only thing on their
-// $PATH is a working binary called `rounce`. Dropping the old name would
-// turn a rename into an outage for exactly the people who joined the two
-// tools up in the first place.
-//
-// The new name always wins. A machine that has moved on is never dragged
-// back to an old binary it still happens to have lying around.
-const (
-	legacyEnvBinary = "INTERLOCK_ROUNCE"
-	legacyName      = "rounce"
-)
-
 // Binary resolves the keep binary, honouring EnvBinary.
 func Binary() (string, bool) {
 	value := os.Getenv(EnvBinary)
-	if value == "" {
-		value = os.Getenv(legacyEnvBinary)
-	}
 	switch {
 	case value == "off":
 		return "", false
@@ -142,9 +121,6 @@ func Binary() (string, bool) {
 		return value, true
 	}
 	if path, err := exec.LookPath("keep"); err == nil {
-		return path, true
-	}
-	if path, err := exec.LookPath(legacyName); err == nil {
 		return path, true
 	}
 	return "", false
