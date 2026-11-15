@@ -621,7 +621,7 @@ tr:last-child td { border-bottom: 0; }
 </table></div>
 {{else}}
 <div class="empty">Nothing is workable right now. Either the queue is empty, or
-every item left touches a file someone is holding — the two are different, and
+every item left touches a file someone is holding. The two are different, and
 <code>keep blocked</code> says which.</div>
 {{end}}
 {{end}}
