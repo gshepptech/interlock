@@ -211,8 +211,8 @@ func TestRedactHidesTheTwoCasesThatHappen(t *testing.T) {
 		values []string
 		want   string
 	}{
-		{"an environment value echoed back", "using key sk-abcdefghijklmnop today",
-			[]string{"sk-abcdefghijklmnop"}, "using key [redacted] today"},
+		{"an environment value echoed back", "using key EXAMPLE-not-a-real-key today",
+			[]string{"EXAMPLE-not-a-real-key"}, "using key [redacted] today"},
 		{"a short value is not a credential", "the id is abc", []string{"abc"}, "the id is abc"},
 		{"an assignment", `GITHUB_TOKEN=EXAMPLE_NOT_A_REAL_TOKEN`, nil, "GITHUB_TOKEN=[redacted]"},
 		{"a json field", `{"api_key": "abcdefgh"}`, nil, `{"api_key":[redacted]`},

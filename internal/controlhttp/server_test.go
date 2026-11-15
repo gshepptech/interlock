@@ -226,7 +226,7 @@ func TestValidActionInvokesControllerAndRedirects(t *testing.T) {
 }
 
 func TestSafeMessageHidesInternalDetails(t *testing.T) {
-	err := &control.Error{Kind: control.Internal, Err: errors.New("/Users/me/private/config.toml: permission denied")}
+	err := &control.Error{Kind: control.Internal, Err: errors.New("/home/me/private/config.toml: permission denied")}
 	result := control.Result{Message: err.Error()}
 	if got := safeMessage(result, err); got != "control action failed" {
 		t.Fatalf("safeMessage = %q", got)
