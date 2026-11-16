@@ -1,14 +1,14 @@
 package runner
 
-// codexSearchPaths are where the binary has actually lived. Codex moved from
+// CodexSearchPaths are where the binary has actually lived. Codex moved from
 // its own bundle into the ChatGPT app, so a single hard-coded path would have
 // broken silently the week it moved.
-var codexSearchPaths = []string{
+var CodexSearchPaths = []string{
 	"/Applications/ChatGPT.app/Contents/Resources/codex",
 	"/Applications/Codex.app/Contents/Resources/codex",
 }
 
-// codexHookTrustFlag makes Codex run its hooks without persisted trust, which
+// CodexHookTrustFlag makes Codex run its hooks without persisted trust, which
 // older Codex releases do not honour.
 //
 // It reads like the sort of flag this package refuses to add, and it is worth
@@ -17,7 +17,7 @@ var codexSearchPaths = []string{
 // bypasses the trust check on the hook commands, which are Interlock's own, and
 // without it Interlock's guard does not run at all. A managed agent whose
 // writes are unguarded is the thing this whole tool exists to prevent.
-const codexHookTrustFlag = "--dangerously-bypass-hook-trust"
+const CodexHookTrustFlag = "--dangerously-bypass-hook-trust"
 
 type codex struct{}
 
@@ -34,11 +34,11 @@ func (codex) Capabilities() Capabilities {
 // visible in every process listing on the machine for as long as the agent
 // runs, and prompts routinely describe work that is not public.
 func (c codex) Build(o Options, env Environment) (Launch, error) {
-	path, dir, err := build(o, env, string(Codex), codexSearchPaths)
+	path, dir, err := build(o, env, string(Codex), CodexSearchPaths)
 	if err != nil {
 		return Launch{}, err
 	}
-	args := []string{codexHookTrustFlag, "exec", "--json", "--color", "never", "-C", dir}
+	args := []string{CodexHookTrustFlag, "exec", "--json", "--color", "never", "-C", dir}
 	if o.Model != "" {
 		args = append(args, "--model", o.Model)
 	}

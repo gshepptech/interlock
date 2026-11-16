@@ -17,7 +17,7 @@ import (
 //
 // It writes a real lease through lease.Store rather than hand-writing the
 // file, so the shape this test locks is the one the real acquire path
-// produces -- a hand-built fixture would keep passing after a change to how
+// produces. A hand-built fixture would keep passing after a change to how
 // leases are stored.
 func statusJSONFixture(t *testing.T, held string) statusJSON {
 	t.Helper()
@@ -75,7 +75,7 @@ func TestStatusJSONReportsHeldPaths(t *testing.T) {
 		t.Errorf("path = %q, want the repo-relative path keep compares against", l.Path)
 	}
 	if l.Agent != "claude" || l.SessionID != "sess-1" {
-		t.Errorf("holder = %q/%q, want claude/sess-1 -- a board has to name who is holding it", l.Agent, l.SessionID)
+		t.Errorf("holder = %q/%q, want claude/sess-1: a board has to name who is holding it", l.Agent, l.SessionID)
 	}
 	if l.ExpiresAt == "" {
 		t.Error("expires_at is empty; a lease with no expiry cannot be shown as expiring")
@@ -109,17 +109,16 @@ func TestStatusJSONUsesEmptyArraysNotNull(t *testing.T) {
 	// exactly the defect this test exists for.
 	for _, field := range []string{`"sessions": []`, `"leases": []`, `"errors": []`} {
 		if !bytes.Contains(buf.Bytes(), []byte(field)) {
-			t.Errorf("output does not contain %s -- a nil slice renders as null:\n%s", field, buf.String())
+			t.Errorf("output does not contain %s: a nil slice renders as null:\n%s", field, buf.String())
 		}
 	}
 }
 
-// TestStatusJSONExitsZeroWithoutJSONFlag guards the dispatch: adding a
+// TestStatusJSONRejectsUnknownArguments guards the dispatch: adding a
 // machine form must not change what plain `interlock status` does, and a
-// stray argument must still be refused rather than silently ignored (which
-// is what `--json` itself did before this existed).
+// stray argument must still be refused rather than silently ignored.
 func TestStatusJSONRejectsUnknownArguments(t *testing.T) {
 	if code := runStatusCmd([]string{"--nope"}); code == 0 {
-		t.Error("an unknown argument exited 0 -- `status --json` was silently ignored before this command existed, which is how the gap went unnoticed")
+		t.Error("an unknown argument exited 0: `status --json` must not be silently ignored")
 	}
 }

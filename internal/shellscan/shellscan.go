@@ -275,7 +275,7 @@ func redirectTarget(segment string) (string, bool) {
 	target := fields[0]
 
 	// `2>&1` duplicates a file descriptor. There is no file, so there is
-	// nothing to hold -- and a lease on a path named "&1" is pure noise in
+	// nothing to hold, and a lease on a path named "&1" is pure noise in
 	// every view that lists what an agent is working on.
 	if strings.HasPrefix(target, "&") {
 		return "", false

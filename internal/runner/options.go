@@ -94,7 +94,7 @@ type Options struct {
 	Model string `json:"model,omitempty"`
 	Team  string `json:"team,omitempty"`
 	// Item names the work this run is doing, as an opaque identifier from
-	// whatever tracks work here — in practice a keep item id. Interlock never
+	// whatever tracks work here, in practice a keep item id. Interlock never
 	// interprets it and never fetches anything with it. It exists so that a
 	// finished run can be traced back to what it was for, and so a repository
 	// with no work store behaves identically without one.

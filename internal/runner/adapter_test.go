@@ -174,7 +174,7 @@ func TestAdaptersRefuseWhatTheyCannotDo(t *testing.T) {
 }
 
 func bundleInstalled() bool {
-	for _, path := range codexSearchPaths {
+	for _, path := range CodexSearchPaths {
 		if _, err := os.Stat(path); err == nil {
 			return true
 		}
