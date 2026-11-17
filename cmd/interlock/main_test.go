@@ -33,12 +33,12 @@ func TestMain(m *testing.M) {
 	build := exec.Command("go", "build", "-o", binPath, ".")
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "build: %v\n%s", err, out)
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 		os.Exit(1)
 	}
 
 	code := m.Run()
-	os.RemoveAll(dir)
+	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }
 
@@ -84,7 +84,9 @@ func repo(t *testing.T, config string) string {
 		} {
 			cmd := exec.Command("git", args...)
 			cmd.Dir = dir
-			cmd.Run()
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v\n%s", args, err, out)
+			}
 		}
 	}
 	return dir
@@ -172,7 +174,9 @@ func bare(t *testing.T) string {
 	if _, err := exec.LookPath("git"); err == nil {
 		cmd := exec.Command("git", "init", "-q")
 		cmd.Dir = dir
-		cmd.Run()
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v\n%s", err, out)
+		}
 	}
 	return dir
 }
