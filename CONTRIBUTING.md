@@ -7,10 +7,11 @@ Bug reports and pull requests are welcome.
 ```bash
 gofmt -l .        # should print nothing
 go vet ./...
-go test ./...
+go test -race ./...
+golangci-lint run  # v2, config in .golangci.yml
 ```
 
-All three must pass. Some tests start real subprocesses and race several
+All four must pass. Some tests start real subprocesses and race several
 processes for the same lease, so run the full suite, not just the package you
 changed.
 
