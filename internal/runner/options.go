@@ -199,7 +199,7 @@ func label(field, value string, max int) error {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
 		case strings.ContainsRune("-_.:", r):
 		default:
-			return fmt.Errorf(
+			return fmt.Errorf( //nolint:staticcheck // ST1005: the trailing colon is one of the allowed characters
 				"%w: %s may contain only letters, digits, and -_.:", ErrInvalid, field)
 		}
 	}

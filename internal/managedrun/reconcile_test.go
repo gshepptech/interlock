@@ -63,8 +63,8 @@ func TestReconcileNeverTrustsOrTouchesAStoredPID(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		bystander.Process.Kill()
-		bystander.Wait()
+		_ = bystander.Process.Kill()
+		_ = bystander.Wait()
 	})
 	if _, _, err := store.Update(record.ID(), record.Spec.Generation, func(status *Status) {
 		status.ChildPID = bystander.Process.Pid

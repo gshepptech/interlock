@@ -201,13 +201,13 @@ func (s *Supervisor) run(ctx context.Context, adapter runner.Adapter, launch run
 		s.fail(ReasonLaunchFailed, err.Error())
 		return err
 	}
-	defer stdout.Close()
+	defer func() { _ = stdout.Close() }()
 	stderr, err := s.Store.OpenLog(s.RunID, Stderr)
 	if err != nil {
 		s.fail(ReasonLaunchFailed, err.Error())
 		return err
 	}
-	defer stderr.Close()
+	defer func() { _ = stderr.Close() }()
 
 	cmd := exec.Command(launch.Path, launch.Args...)
 	cmd.Dir, cmd.Env = launch.Dir, launch.Env
@@ -242,8 +242,8 @@ func (s *Supervisor) run(ctx context.Context, adapter runner.Adapter, launch run
 		// The agent is already running, so there is no honest way to report a
 		// launch failure. Kill what we started rather than leave an agent nobody
 		// can control.
-		signalGroup(cmd.Process.Pid, signalKill)
-		cmd.Wait()
+		_ = signalGroup(cmd.Process.Pid, signalKill)
+		_ = cmd.Wait()
 		s.fail(ReasonLaunchFailed, err.Error())
 		return err
 	}
@@ -251,8 +251,8 @@ func (s *Supervisor) run(ctx context.Context, adapter runner.Adapter, launch run
 	// The prompt is the last thing the agent needs before it can work, and
 	// closing stdin is what tells it there is no more.
 	go func() {
-		pipes.stdinWrite.Write(prompt)
-		pipes.stdinWrite.Close()
+		_, _ = pipes.stdinWrite.Write(prompt)
+		_ = pipes.stdinWrite.Close()
 	}()
 
 	if _, _, err := s.Store.Transition(s.RunID, s.generation, Running, func(status *Status) {
@@ -289,9 +289,9 @@ func (s *Supervisor) run(ctx context.Context, adapter runner.Adapter, launch run
 	}
 
 	close(done)
-	listener.Close()
-	os.Remove(s.Store.ControlAddress(s.RunID))
-	os.Remove(s.Store.ControlAddrPath(s.RunID))
+	_ = listener.Close()
+	_ = os.Remove(s.Store.ControlAddress(s.RunID))
+	_ = os.Remove(s.Store.ControlAddrPath(s.RunID))
 
 	return s.finish(waitErr)
 }
@@ -324,17 +324,17 @@ func openPipes() (*pipeSet, error) {
 
 func (p *pipeSet) closeChild() {
 	p.childClosed.Do(func() {
-		p.stdinRead.Close()
-		p.stdoutWrite.Close()
-		p.stderrWrite.Close()
+		_ = p.stdinRead.Close()
+		_ = p.stdoutWrite.Close()
+		_ = p.stderrWrite.Close()
 	})
 }
 
 func (p *pipeSet) closeParent() {
 	p.parentClose.Do(func() {
-		p.stdinWrite.Close()
-		p.stdoutRead.Close()
-		p.stderrRead.Close()
+		_ = p.stdinWrite.Close()
+		_ = p.stdoutRead.Close()
+		_ = p.stderrRead.Close()
 	})
 }
 
@@ -363,8 +363,8 @@ func (s *Supervisor) listen() (net.Listener, error) {
 		return nil, err
 	}
 	if err := writeExclusive(s.Store.ControlAddrPath(s.RunID), []byte(fallback)); err != nil {
-		listener.Close()
-		os.Remove(fallback)
+		_ = listener.Close()
+		_ = os.Remove(fallback)
 		return nil, err
 	}
 	return listener, nil
@@ -379,7 +379,7 @@ func bind(path string) (net.Listener, error) {
 		return nil, fmt.Errorf("open control socket: %w", err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
-		listener.Close()
+		_ = listener.Close()
 		return nil, fmt.Errorf("secure control socket: %w", err)
 	}
 	return listener, nil
@@ -403,15 +403,15 @@ func (s *Supervisor) accept(listener net.Listener, token string, done <-chan str
 			continue
 		}
 		s.answer(conn, token)
-		conn.Close()
+		_ = conn.Close()
 	}
 }
 
 func (s *Supervisor) answer(conn net.Conn, token string) {
-	conn.SetDeadline(time.Now().Add(callTimeout))
+	_ = conn.SetDeadline(time.Now().Add(callTimeout))
 	var request ControlRequest
 	if err := readFrame(conn, &request); err != nil {
-		writeFrame(conn, ControlResponse{
+		_ = writeFrame(conn, ControlResponse{
 			Version: ProtocolVersion, Outcome: MalformedRequest,
 			Detail: "the request could not be read",
 		})
@@ -420,7 +420,7 @@ func (s *Supervisor) answer(conn net.Conn, token string) {
 	outcome, detail := authorise(request, s.RunID, s.generation, token)
 	if outcome != Applied {
 		// An unauthorised caller learns nothing about the run, not even its state.
-		writeFrame(conn, ControlResponse{Version: ProtocolVersion, Outcome: outcome, Detail: detail})
+		_ = writeFrame(conn, ControlResponse{Version: ProtocolVersion, Outcome: outcome, Detail: detail})
 		return
 	}
 	outcome, detail = s.apply(request.Action)
@@ -429,7 +429,7 @@ func (s *Supervisor) answer(conn net.Conn, token string) {
 	if err == nil {
 		response.Status = status.Status
 	}
-	writeFrame(conn, response)
+	_ = writeFrame(conn, response)
 }
 
 // apply performs one lifecycle request against the live process group.
@@ -477,7 +477,7 @@ func (s *Supervisor) apply(action ControlAction) (ControlOutcome, string) {
 		// A stopped process cannot act on an interrupt, so it has to be woken
 		// first or the graceful stop would silently never happen.
 		if s.paused {
-			signalGroup(s.group, signalResume)
+			_ = signalGroup(s.group, signalResume)
 			s.paused = false
 		}
 		if err := signalGroup(s.group, signalInterrupt); err != nil {
@@ -508,7 +508,7 @@ func (s *Supervisor) graceExpired() {
 		return
 	}
 	s.forceRequired = true
-	s.Store.Update(s.RunID, s.generation, func(status *Status) { status.ForceRequired = true })
+	_, _, _ = s.Store.Update(s.RunID, s.generation, func(status *Status) { status.ForceRequired = true })
 }
 
 // watchContext turns cancellation into the same graceful stop a user would ask
@@ -537,7 +537,7 @@ func (s *Supervisor) watchQuiet(done <-chan struct{}) {
 			silent := s.Now().Sub(s.lastOutput) >= s.QuietAfter && !s.paused && !s.stopping
 			s.mu.Unlock()
 			if silent {
-				s.Store.Transition(s.RunID, s.generation, Quiet, nil)
+				_, _, _ = s.Store.Transition(s.RunID, s.generation, Quiet, nil)
 			}
 		}
 	}
@@ -554,7 +554,7 @@ func (s *Supervisor) drain(adapter runner.Adapter, stream Stream, source io.Read
 	for {
 		chunk, err := reader.ReadSlice('\n')
 		if len(chunk) > 0 {
-			log.Write(chunk)
+			_, _ = log.Write(chunk)
 			if len(line) < maxDecodeLine {
 				line = append(line, chunk...)
 			}
@@ -592,7 +592,7 @@ func (s *Supervisor) observe(event runner.Event) {
 	s.mu.Unlock()
 
 	if event.Kind == runner.Result || event.Kind == runner.Failure {
-		s.Store.Update(s.RunID, s.generation, func(status *Status) {
+		_, _, _ = s.Store.Update(s.RunID, s.generation, func(status *Status) {
 			status.LastOutputAt, status.Summary = now, event.Summary
 		})
 		return
@@ -603,17 +603,17 @@ func (s *Supervisor) observe(event runner.Event) {
 	// Output is proof the agent is working, so it ends any quiet spell. The
 	// transition is refused if the run has moved on, which is what should happen.
 	if quiet {
-		s.Store.Transition(s.RunID, s.generation, Running, func(status *Status) {
+		_, _, _ = s.Store.Transition(s.RunID, s.generation, Running, func(status *Status) {
 			status.LastOutputAt = now
 		})
 	}
-	s.Store.Update(s.RunID, s.generation, func(status *Status) { status.LastOutputAt = now })
+	_, _, _ = s.Store.Update(s.RunID, s.generation, func(status *Status) { status.LastOutputAt = now })
 }
 
 // transition is the locked-path helper. The caller already holds s.mu, and the
 // store takes its own lock, so nothing here waits on anything that waits on it.
 func (s *Supervisor) transition(state State, mutate func(*Status)) {
-	s.Store.Transition(s.RunID, s.generation, state, mutate)
+	_, _, _ = s.Store.Transition(s.RunID, s.generation, state, mutate)
 }
 
 // finish records how the agent ended, exactly once.
@@ -671,7 +671,7 @@ func (s *Supervisor) finish(waitErr error) error {
 // fail records a run that never got going. It is durable so that a retry is a
 // decision rather than a guess about what happened.
 func (s *Supervisor) fail(reason Reason, summary string) {
-	s.Store.Transition(s.RunID, s.generation, Failed, func(status *Status) {
+	_, _, _ = s.Store.Transition(s.RunID, s.generation, Failed, func(status *Status) {
 		status.Reason, status.Summary = reason, summary
 	})
 }

@@ -132,7 +132,7 @@ func (c *Store) call(id string, action ControlAction, timeout time.Duration) (Co
 	if err != nil {
 		return ControlResponse{}, fmt.Errorf("%w: %s", ErrNoSupervisor, id)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if err := conn.SetDeadline(time.Now().Add(callTimeout)); err != nil {
 		return ControlResponse{}, fmt.Errorf("control deadline: %w", err)
 	}

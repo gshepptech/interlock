@@ -204,10 +204,10 @@ func (s *Store) write(g *grant) error {
 		return fmt.Errorf("create temp grant: %w", err)
 	}
 	name := tmp.Name()
-	defer os.Remove(name) // no-op once the rename succeeds
+	defer func() { _ = os.Remove(name) }() // no-op once the rename succeeds
 
 	if _, err := tmp.Write(enc); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write temp grant: %w", err)
 	}
 	if err := tmp.Close(); err != nil {

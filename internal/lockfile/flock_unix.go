@@ -29,14 +29,14 @@ func Acquire(path string) (unlock func(), err error) {
 		return nil, fmt.Errorf("open lock %s: %w", path, err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("flock %s: %w", path, err)
 	}
 	return func() {
 		// Closing the descriptor releases the lock. Unlocking first makes the
 		// ordering explicit rather than relying on that side effect.
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
 	}, nil
 }
 
@@ -54,15 +54,15 @@ func TryAcquire(path string) (unlock func(), acquired bool, err error) {
 		return nil, false, fmt.Errorf("open lock %s: %w", path, err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
+		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, false, nil
 		}
 		return nil, false, fmt.Errorf("flock %s: %w", path, err)
 	}
 	return func() {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
 	}, true, nil
 }
 

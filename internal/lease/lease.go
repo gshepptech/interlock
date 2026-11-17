@@ -246,7 +246,7 @@ func (s *Store) Release(sessionID string) (int, error) {
 		}
 	}
 	// Free of charge: the lock is held and the directory is already read.
-	s.pruneLocked()
+	_, _ = s.pruneLocked()
 	return released, nil
 }
 
@@ -393,10 +393,10 @@ func (s *Store) write(file string, l *Lease) error {
 		return fmt.Errorf("create temp lease: %w", err)
 	}
 	name := tmp.Name()
-	defer os.Remove(name) // no-op once the rename succeeds
+	defer func() { _ = os.Remove(name) }() // no-op once the rename succeeds
 
 	if _, err := tmp.Write(enc); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write temp lease: %w", err)
 	}
 	if err := tmp.Close(); err != nil {

@@ -148,7 +148,7 @@ func (c *Store) Create(input Create) (Record, error) {
 	// Anything that fails from here leaves a half-built run, so it is removed
 	// rather than left for a reader to puzzle over.
 	cleanup := func(cause error) (Record, error) {
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 		return Record{}, cause
 	}
 
@@ -652,12 +652,12 @@ func writeExclusive(path string, raw []byte) error {
 		return fmt.Errorf("create %s: %w", filepath.Base(path), err)
 	}
 	if _, err := file.Write(raw); err != nil {
-		file.Close()
-		os.Remove(path)
+		_ = file.Close()
+		_ = os.Remove(path)
 		return fmt.Errorf("write %s: %w", filepath.Base(path), err)
 	}
 	if err := file.Close(); err != nil {
-		os.Remove(path)
+		_ = os.Remove(path)
 		return fmt.Errorf("close %s: %w", filepath.Base(path), err)
 	}
 	return nil
@@ -677,10 +677,10 @@ func writeAtomicJSON(path string, value any) error {
 		return fmt.Errorf("create temp record: %w", err)
 	}
 	name := tmp.Name()
-	defer os.Remove(name) // no-op once the rename succeeds
+	defer func() { _ = os.Remove(name) }() // no-op once the rename succeeds
 
 	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write temp record: %w", err)
 	}
 	if err := tmp.Close(); err != nil {

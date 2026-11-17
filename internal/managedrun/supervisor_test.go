@@ -452,8 +452,8 @@ func (f *fixture) rawCall(t *testing.T, request ControlRequest) ControlResponse 
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(callTimeout))
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(callTimeout))
 	if err := writeFrame(conn, request); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -488,8 +488,8 @@ func startSleeper(t *testing.T) int {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		cmd.Process.Kill()
-		cmd.Wait()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 	})
 	return cmd.Process.Pid
 }

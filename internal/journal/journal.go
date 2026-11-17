@@ -214,7 +214,7 @@ func (s *Store) Append(e Entry) error {
 		return fmt.Errorf("open journal: %w", err)
 	}
 	if _, err := f.Write(append(line, '\n')); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("write journal: %w", err)
 	}
 	if err := f.Close(); err != nil {
@@ -434,10 +434,10 @@ func (s *Store) trimIfLong() error {
 		return fmt.Errorf("create temp journal: %w", err)
 	}
 	name := tmp.Name()
-	defer os.Remove(name) // no-op once the rename succeeds
+	defer func() { _ = os.Remove(name) }() // no-op once the rename succeeds
 
 	if _, err := tmp.WriteString(buf.String()); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write temp journal: %w", err)
 	}
 	if err := tmp.Close(); err != nil {

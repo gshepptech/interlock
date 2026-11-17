@@ -53,7 +53,7 @@ func (l Launcher) Start(id string) (Record, error) {
 	}
 
 	if err := l.spawn(id); err != nil {
-		l.Store.Transition(id, record.Spec.Generation, Failed, func(status *Status) {
+		_, _, _ = l.Store.Transition(id, record.Spec.Generation, Failed, func(status *Status) {
 			status.Reason, status.Summary = ReasonLaunchFailed, err.Error()
 		})
 		reloaded, loadErr := l.Store.Load(id)
@@ -74,7 +74,7 @@ func (l Launcher) spawn(id string) error {
 	if err != nil {
 		return fmt.Errorf("open bootstrap log: %w", err)
 	}
-	defer bootstrap.Close()
+	defer func() { _ = bootstrap.Close() }()
 
 	cmd := exec.Command(l.Executable, "supervise", id)
 	cmd.Dir = l.Store.root

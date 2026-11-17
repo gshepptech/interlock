@@ -29,7 +29,7 @@ func TestLogsRotateAndStayBounded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenLog: %v", err)
 	}
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	writer.max = 1024
 
 	for i := range 10 {
@@ -68,7 +68,7 @@ func TestLogsRotateAndStayBounded(t *testing.T) {
 func TestTailReadsTheEndAndSaysWhenItSkipped(t *testing.T) {
 	store, id := logStore(t)
 	writer, _ := store.OpenLog(id, Stdout)
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	write(t, writer, strings.Repeat("a", 100)+"tail")
 
 	chunk, cursor, err := store.Tail(id, Stdout, 4)
@@ -88,7 +88,7 @@ func TestTailReadsTheEndAndSaysWhenItSkipped(t *testing.T) {
 func TestTailReachesIntoTheRotatedFile(t *testing.T) {
 	store, id := logStore(t)
 	writer, _ := store.OpenLog(id, Stdout)
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	writer.max = 16
 	write(t, writer, "older output\n")
 	write(t, writer, "newer output\n")
@@ -105,7 +105,7 @@ func TestTailReachesIntoTheRotatedFile(t *testing.T) {
 func TestFollowSeesEveryByteExactlyOnceAcrossRotation(t *testing.T) {
 	store, id := logStore(t)
 	writer, _ := store.OpenLog(id, Stdout)
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	writer.max = 64
 
 	var want, got bytes.Buffer
@@ -139,7 +139,7 @@ func TestFollowSeesEveryByteExactlyOnceAcrossRotation(t *testing.T) {
 func TestFollowReportsOutputItCouldNotShow(t *testing.T) {
 	store, id := logStore(t)
 	writer, _ := store.OpenLog(id, Stdout)
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	write(t, writer, "first\n")
 
 	_, cursor, err := store.Tail(id, Stdout, 4096)
@@ -172,7 +172,7 @@ func TestFollowAndWriteDoNotRace(t *testing.T) {
 			t.Fatal(err)
 		}
 		wg.Go(func() {
-			defer writer.Close()
+			defer func() { _ = writer.Close() }()
 			writer.max = 256
 			for i := range 200 {
 				if _, err := writer.Write(fmt.Appendf(nil, "%s %03d\n", stream, i)); err != nil {

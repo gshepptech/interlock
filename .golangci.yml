@@ -1,0 +1,29 @@
+version: "2"
+
+run:
+  modules-download-mode: readonly
+
+linters:
+  default: standard
+  settings:
+    errcheck:
+      # errcheck already exempts fmt.Print*. The F variants here write CLI
+      # output to stdout, stderr or a test buffer, where a failed write has no
+      # recovery and nobody left to tell.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/gshepptech/interlock
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

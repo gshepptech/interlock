@@ -302,8 +302,12 @@ func TestUnreadableLinesAreSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	f.WriteString("{not json\n\n{\"kind\":\"from_the_future\",\"at\":\"2026-01-01T00:00:00Z\"}\n")
-	f.Close()
+	if _, err := f.WriteString("{not json\n\n{\"kind\":\"from_the_future\",\"at\":\"2026-01-01T00:00:00Z\"}\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
 
 	if err := s.Append(entry(BlockedLease, "also-good.go")); err != nil {
 		t.Fatalf("Append: %v", err)
