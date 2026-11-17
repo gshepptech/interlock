@@ -239,7 +239,7 @@ func grantRemedy(cfg *config.Config, sessionID string, paths []string) {
 	if err != nil {
 		return
 	}
-	store.Grant(sessionID, paths)
+	_ = store.Grant(sessionID, paths)
 }
 
 func clearRemedy(cfg *config.Config, sessionID string) {
@@ -250,5 +250,5 @@ func clearRemedy(cfg *config.Config, sessionID string) {
 	if err != nil {
 		return
 	}
-	store.Clear(sessionID)
+	_ = store.Clear(sessionID)
 }

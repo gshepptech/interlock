@@ -103,7 +103,7 @@ func findCodex() (string, error) {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf(
+	return "", fmt.Errorf( //nolint:staticcheck // ST1005: printed as-is as two lines of guidance
 		"cannot find the codex binary. Looked on PATH and in %s.\n"+
 			"Set INTERLOCK_CODEX_BIN to its location.",
 		strings.Join(runner.CodexSearchPaths, ", "))

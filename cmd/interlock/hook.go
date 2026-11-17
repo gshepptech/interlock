@@ -37,7 +37,7 @@ func dumpPayload(agent hookio.Agent, event string, raw []byte) {
 	if err != nil {
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	record, err := json.Marshal(map[string]any{
 		"at": time.Now().UTC().Format(time.RFC3339Nano), "agent": agent,
 		"event": event, "payload": json.RawMessage(raw),
@@ -45,7 +45,7 @@ func dumpPayload(agent hookio.Agent, event string, raw []byte) {
 	if err != nil {
 		return
 	}
-	file.Write(append(record, '\n'))
+	_, _ = file.Write(append(record, '\n'))
 }
 
 // runHook is the hot path. Its one hard rule: this tool must never be the reason
@@ -145,7 +145,7 @@ func renew(cfg *config.Config, team string, agent hookio.Agent, ev *hookio.Event
 		}
 		// Errors are ignored on purpose: a failed renewal costs the claim its
 		// time to live, and there is nothing useful to tell the agent.
-		store.AcquireFor(rel(cfg.Root, file), holder, hold, implicit)
+		_, _, _ = store.AcquireFor(rel(cfg.Root, file), holder, hold, implicit)
 	}
 }
 
@@ -159,7 +159,7 @@ func release(cfg *config.Config, sessionID string) {
 	if err != nil {
 		return
 	}
-	store.Release(sessionID)
+	_, _ = store.Release(sessionID)
 }
 
 // note records that this session is alive and what it is.
@@ -176,7 +176,7 @@ func note(cfg *config.Config, ev *hookio.Event, team string, agent hookio.Agent)
 	if err != nil {
 		return
 	}
-	store.See(ev.SessionID, session.Sighting{
+	_ = store.See(ev.SessionID, session.Sighting{
 		Agent: string(agent), Team: team, Model: ev.Model, CWD: ev.CWD,
 		RunID: managedRunID(),
 	})
@@ -211,7 +211,7 @@ func recordTouches(cfg *config.Config, ev *hookio.Event) {
 	for _, f := range ev.Files {
 		paths = append(paths, rel(cfg.Root, f))
 	}
-	store.Touched(ev.SessionID, ev.ToolName, paths)
+	_ = store.Touched(ev.SessionID, ev.ToolName, paths)
 }
 
 func endSession(cfg *config.Config, sessionID string) {
@@ -222,7 +222,7 @@ func endSession(cfg *config.Config, sessionID string) {
 	if err != nil {
 		return
 	}
-	store.End(sessionID)
+	_ = store.End(sessionID)
 }
 
 // emitContext returns text both agents inject into the model's context. The
@@ -263,7 +263,7 @@ func record(cfg *config.Config, e journal.Entry) {
 	if err != nil {
 		return
 	}
-	store.Append(e)
+	_ = store.Append(e)
 }
 
 // markObserved records that an agent invoked a hook here. Errors are dropped:
@@ -276,5 +276,5 @@ func markObserved(cfg *config.Config, agent string) {
 	if err != nil {
 		return
 	}
-	store.Mark(agent)
+	_ = store.Mark(agent)
 }

@@ -298,7 +298,7 @@ func (s Service) Repair(opts Options, dryRun bool) ([]Repair, error) {
 	case entriesErr != nil:
 		errs = append(errs, fmt.Errorf("codex trust entries: %w", entriesErr))
 	case opts.CodexFile == "":
-		errs = append(errs, errors.New("Codex config path is unavailable"))
+		errs = append(errs, errors.New("Codex config path is unavailable")) //nolint:staticcheck // ST1005: Codex is a product name
 	default:
 		change, trustErr := install.TrustCodexConfig(
 			opts.CodexFile, cfg.Root, entries, dryRun)

@@ -148,10 +148,10 @@ func (s *Store) write(record *Record) error {
 		return fmt.Errorf("create temp record: %w", err)
 	}
 	name := tmp.Name()
-	defer os.Remove(name) // no-op once the rename succeeds
+	defer func() { _ = os.Remove(name) }() // no-op once the rename succeeds
 
 	if _, err := tmp.Write(enc); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write temp record: %w", err)
 	}
 	if err := tmp.Close(); err != nil {

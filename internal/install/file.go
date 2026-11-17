@@ -84,18 +84,18 @@ func writeExpected(file string, body []byte, expected fileSnapshot) error {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	name := tmp.Name()
-	defer os.Remove(name) // no-op once the rename succeeds
+	defer func() { _ = os.Remove(name) }() // no-op once the rename succeeds
 
 	mode := expected.mode
 	if mode == 0 {
 		mode = 0o644
 	}
 	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("set temp file mode: %w", err)
 	}
 	if _, err := tmp.Write(body); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write temp file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
@@ -137,7 +137,7 @@ func backupOnce(file string) (string, error) {
 		return "", fmt.Errorf("create backup: %w", err)
 	}
 	if _, err := f.Write(snapshot.raw); err != nil {
-		f.Close()
+		_ = f.Close()
 		return "", fmt.Errorf("write backup: %w", err)
 	}
 	if err := f.Close(); err != nil {

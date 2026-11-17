@@ -53,7 +53,7 @@ func (c *Store) OpenLog(id string, stream Stream) (*LogWriter, error) {
 	}
 	info, err := file.Stat()
 	if err != nil {
-		file.Close()
+		_ = file.Close()
 		return nil, fmt.Errorf("inspect %s log: %w", stream, err)
 	}
 	return &LogWriter{
@@ -275,7 +275,7 @@ func readRange(path string, from, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open log: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	if from > 0 {
 		if _, err := file.Seek(from, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("seek log: %w", err)

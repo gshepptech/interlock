@@ -425,7 +425,7 @@ func TestHookPayloadsCanBeCapturedForDiagnosis(t *testing.T) {
 	quiet.Dir = dir
 	quiet.Env = append(os.Environ(), "HOME="+dir)
 	quiet.Stdin = strings.NewReader(payload)
-	quiet.Run()
+	_ = quiet.Run()
 	entries, err := os.ReadDir(filepath.Dir(dump))
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("dump directory holds %d files, want 1 (err=%v)", len(entries), err)

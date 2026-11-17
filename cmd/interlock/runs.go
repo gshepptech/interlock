@@ -273,7 +273,7 @@ func runLogs(service runcontrol.Service, args []string) int {
 	if chunk.Truncated {
 		fmt.Fprintln(os.Stderr, "(earlier output not shown)")
 	}
-	os.Stdout.WriteString(chunk.Text())
+	_, _ = os.Stdout.WriteString(chunk.Text())
 	if !follow {
 		return 0
 	}
@@ -303,7 +303,7 @@ func tail(service runcontrol.Service, record managedrun.Record,
 		chunk, next, err := service.Logs(ctx, id, stream, cursor, 64*1024)
 		if err == nil {
 			cursor = next
-			os.Stdout.WriteString(chunk.Text())
+			_, _ = os.Stdout.WriteString(chunk.Text())
 		}
 
 		current, err := service.Show(ctx, id)
@@ -422,7 +422,7 @@ func noteRunBlocked(root, detail string) {
 	if err != nil {
 		return
 	}
-	store.Transition(id, record.Spec.Generation, managedrun.Blocked, func(status *managedrun.Status) {
+	_, _, _ = store.Transition(id, record.Spec.Generation, managedrun.Blocked, func(status *managedrun.Status) {
 		status.Summary = detail
 	})
 }

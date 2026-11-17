@@ -386,9 +386,9 @@ func writeExclusive(path string, value any) error {
 		return fmt.Errorf("create handoff temp: %w", err)
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write handoff temp: %w", err)
 	}
 	if err := tmp.Close(); err != nil {

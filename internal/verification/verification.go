@@ -164,9 +164,9 @@ func (s *Store) write(file string, snapshot *gitstate.Snapshot) error {
 		return fmt.Errorf("create temp verification: %w", err)
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write temp verification: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
